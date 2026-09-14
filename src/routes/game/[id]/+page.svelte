@@ -3,9 +3,12 @@
 	import { goto } from '$app/navigation';
 	import { getSocket } from '$lib/socket';
 	import { sortTiles, tileName, windLabel, type Tile as TileT, type WindRank } from '$lib/tiles';
+	import { evaluateShanten, computeUkeire, suggestDiscards, evaluateClaimOptions, shantenLabel } from '$lib/shanten';
 	import TileComponent from '$lib/components/Tile.svelte';
 	import { onMount, onDestroy } from 'svelte';
 	import type { Socket } from 'socket.io-client';
+
+	type AssistMode = 'regular' | 'hint' | 'learning';
 
 	type Meld = { type: 'chow' | 'pung' | 'kong'; tiles: TileT[]; concealed: boolean; claimedFrom: string | null; promoted?: boolean };
 
@@ -16,6 +19,7 @@
 		handCount: number;
 		melds: Meld[];
 		flowers: TileT[];
+		assistMode: AssistMode;
 		isDealer: boolean;
 		isCurrent: boolean;
 		disconnected: boolean;
@@ -72,6 +76,8 @@
 		myMelds: Meld[];
 		myFlowers: TileT[];
 		mySeatWind: WindRank | null;
+		myAssistMode: AssistMode;
+		myLastDrawnTileId: string | null;
 		isMyTurn: boolean;
 		turnPhase: 'awaitingDraw' | 'awaitingDiscard' | 'awaitingClaims';
 		canDeclareSelfDrawWin: boolean;
@@ -104,6 +110,40 @@
 	let chatInput = $state('');
 	let chatUnreadCount = $state(0);
 	let chatLastSeenTimestamp = $state(0);
+	let showDiscardHint = $state(false);
+	let showClaimHint = $state(false);
+
+	let myMeldsNeeded = $derived.by(() => {
+		const g = gameState;
+		return g ? 4 - g.myMelds.length : 4;
+	});
+	let myShanten = $derived.by(() => {
+		const g = gameState;
+		return g ? evaluateShanten(g.myHand, myMeldsNeeded) : 0;
+	});
+	let myUkeire = $derived.by(() => {
+		const g = gameState;
+		return g ? computeUkeire(g.myHand, myMeldsNeeded) : [];
+	});
+	let myDiscardSuggestions = $derived.by(() => {
+		const g = gameState;
+		if (!(g && g.isMyTurn && g.turnPhase === 'awaitingDiscard')) return [];
+		return suggestDiscards(g.myHand, myMeldsNeeded);
+	});
+	let myClaimHint = $derived.by(() => {
+		const g = gameState;
+		const opts = g?.pendingClaim?.myOptions;
+		if (!g || !opts) return null;
+		return evaluateClaimOptions(g.myHand, g.myMelds.length, g.pendingClaim!.discardTile, opts);
+	});
+
+	$effect(() => {
+		const g = gameState;
+		if (!(g?.isMyTurn && g.turnPhase === 'awaitingDiscard')) showDiscardHint = false;
+	});
+	$effect(() => {
+		if (!gameState?.pendingClaim?.myOptions) showClaimHint = false;
+	});
 
 	onMount(async () => {
 		const socket = await getSocket();
@@ -248,6 +288,39 @@
 	function scoreFor(result: HandResult, playerId: string): PlayerScore | undefined {
 		return result.scores.find((s) => s.playerId === playerId);
 	}
+
+	function setAssistMode(mode: AssistMode) {
+		client?.emit('setAssistMode', { mode });
+	}
+
+	function modeLabel(mode: AssistMode): string {
+		if (mode === 'learning') return '🎓 Learning';
+		if (mode === 'hint') return '💡 Hint';
+		return '';
+	}
+
+	function visibleCount(suit: string, rank: number | string): number {
+		const g = gameState;
+		if (!g) return 0;
+		const matches = (t: TileT) => t.suit === suit && t.rank === rank;
+		let count = g.myHand.filter(matches).length;
+		for (const m of g.myMelds) count += m.tiles.filter(matches).length;
+		for (const p of g.players) for (const m of p.melds) count += m.tiles.filter(matches).length;
+		count += g.discards.filter((d) => matches(d.tile)).length;
+		return count;
+	}
+
+	function remainingCount(suit: string, rank: number | string): number {
+		return Math.max(0, 4 - visibleCount(suit, rank));
+	}
+
+	function drawnTileSuggestion() {
+		const g = gameState;
+		if (!g || !g.myLastDrawnTileId) return null;
+		const drawnTile = g.myHand.find((t) => t.id === g.myLastDrawnTileId);
+		if (!drawnTile) return null;
+		return myDiscardSuggestions.find((s) => s.tile.suit === drawnTile.suit && s.tile.rank === drawnTile.rank) ?? null;
+	}
 </script>
 
 <div class="min-h-screen flex flex-col bg-emerald-950 text-white">
@@ -346,6 +419,7 @@
 								{#if player.seatWind}<span class="text-xs bg-slate-600/50 px-1.5 py-0.5 rounded">{player.seatWind}</span>{/if}
 								{#if player.isDealer}<span class="text-xs bg-yellow-500/30 text-yellow-200 px-1.5 py-0.5 rounded">Dealer</span>{/if}
 								{#if player.disconnected}<span class="text-xs bg-red-500/30 text-red-300 px-1.5 py-0.5 rounded">Away</span>{/if}
+								{#if modeLabel(player.assistMode)}<span class="text-xs bg-sky-500/20 text-sky-200 px-1.5 py-0.5 rounded">{modeLabel(player.assistMode)}</span>{/if}
 							</div>
 						</div>
 						<p class="text-xs text-emerald-200 mb-2">{player.totalScore} pts · {player.handCount} tiles</p>
@@ -415,6 +489,22 @@
 							{/each}
 						</div>
 					{/if}
+
+					{#if gameState.myAssistMode === 'hint'}
+						{#if !showClaimHint}
+							<button onclick={() => (showClaimHint = true)} class="text-xs px-3 py-1.5 bg-sky-700 hover:bg-sky-600 rounded-lg transition-colors touch-manipulation">💡 Hint</button>
+						{:else if myClaimHint}
+							<div class="w-full bg-sky-950/60 border border-sky-500/30 rounded-lg p-3 text-xs text-sky-100 space-y-1">
+								<p>Pass: stay at <strong>{shantenLabel(myClaimHint.currentShanten)}</strong></p>
+								{#each myClaimHint.evaluations as ev}
+									<p class={ev.resultingShanten < myClaimHint.currentShanten ? 'text-emerald-300 font-semibold' : ''}>
+										{ev.type === 'chi' ? 'Chi' : ev.type === 'pong' ? 'Pong' : 'Kong'}: → <strong>{shantenLabel(ev.resultingShanten)}</strong>
+										{#if ev.resultingShanten < myClaimHint.currentShanten}(improves your hand){:else if ev.resultingShanten > myClaimHint.currentShanten}(sets you back){:else}(no change){/if}
+									</p>
+								{/each}
+							</div>
+						{/if}
+					{/if}
 				</div>
 			{/if}
 
@@ -424,8 +514,37 @@
 					<h3 class="font-bold text-sm">
 						You{gameState.mySeatWind ? ` (${gameState.mySeatWind})` : ''}
 					</h3>
-					<span class="text-xs text-emerald-200">{gameState.players.find((p) => p.id === gameState!.myPlayerId)?.totalScore ?? 0} pts</span>
+					<div class="flex items-center gap-2">
+						<span class="text-xs text-emerald-200">{gameState.players.find((p) => p.id === gameState!.myPlayerId)?.totalScore ?? 0} pts</span>
+						<div class="flex rounded-lg overflow-hidden border border-white/10 text-xs">
+							{#each [['regular', 'Regular'], ['hint', 'Hint'], ['learning', 'Learning']] as [mode, label]}
+								<button
+									onclick={() => setAssistMode(mode as AssistMode)}
+									class="px-2 py-1 transition-colors touch-manipulation {gameState.myAssistMode === mode ? 'bg-sky-600 text-white' : 'bg-black/20 text-emerald-200 hover:bg-black/30'}"
+								>{label}</button>
+							{/each}
+						</div>
+					</div>
 				</div>
+
+				{#if gameState.myAssistMode === 'learning'}
+					<div class="w-full bg-sky-950/50 border border-sky-500/30 rounded-lg p-3 text-xs text-sky-100">
+						<p class="font-semibold">🎓 {shantenLabel(myShanten)}</p>
+						{#if myShanten > -1 && myUkeire.length > 0}
+							<p class="mt-1 text-sky-200/80">Tiles that would help, and how many are still unseen:</p>
+							<div class="flex flex-wrap gap-1 mt-1">
+								{#each myUkeire as u}
+									<span class="inline-block bg-black/30 rounded px-1.5 py-0.5">
+										{tileName({ suit: u.tile.suit, rank: u.tile.rank } as TileT)} ({remainingCount(u.tile.suit, u.tile.rank)} left)
+									</span>
+								{/each}
+							</div>
+						{:else if myShanten <= -1}
+							<p class="mt-1 text-emerald-300">Your hand is already complete!</p>
+						{/if}
+						<p class="mt-2 text-sky-300/60">Named-hand odds will show here once those are added.</p>
+					</div>
+				{/if}
 
 				{#if gameState.myMelds.length > 0 || gameState.myFlowers.length > 0}
 					<div class="flex flex-wrap gap-2 w-full">
@@ -466,6 +585,27 @@
 				</div>
 				{#if gameState.isMyTurn && gameState.turnPhase === 'awaitingDiscard'}
 					<p class="text-xs text-emerald-200/70">Tap a tile above to discard it</p>
+					{#if gameState.myAssistMode === 'hint'}
+						{#if !showDiscardHint}
+							<button onclick={() => (showDiscardHint = true)} class="text-xs px-3 py-1.5 bg-sky-700 hover:bg-sky-600 rounded-lg transition-colors touch-manipulation">💡 Hint</button>
+						{:else if myDiscardSuggestions.length > 0}
+							{@const best = myDiscardSuggestions[0]}
+							{@const drawn = drawnTileSuggestion()}
+							<div class="w-full max-w-md bg-sky-950/60 border border-sky-500/30 rounded-lg p-3 text-xs text-sky-100 space-y-1">
+								<p>
+									Best discard: <strong>{tileName(best.tile)}</strong> → {shantenLabel(best.resultingShanten)}
+									({best.ukeireCount} tile type{best.ukeireCount === 1 ? '' : 's'} would help after)
+								</p>
+								{#if drawn && drawn.tile.suit === best.tile.suit && drawn.tile.rank === best.tile.rank}
+									<p class="text-emerald-300">That's the tile you just drew — go ahead and discard it.</p>
+								{:else if drawn}
+									<p class="text-amber-200">
+										Keep what you drew — discarding it instead would leave you at {shantenLabel(drawn.resultingShanten)}.
+									</p>
+								{/if}
+							</div>
+						{/if}
+					{/if}
 				{/if}
 			</div>
 

@@ -426,6 +426,7 @@ function getOrCreateGame(roomId) {
 			currentPlayerIndex: 0,
 			turnPhase: 'awaitingDraw',
 			turnEntrySource: 'draw',
+			lastDrawnTileId: null,
 			pendingClaim: null,
 			roundWind: 'E',
 			handNumber: 0,
@@ -485,6 +486,8 @@ function getStateForPlayer(game, playerId) {
 		myMelds: player.melds,
 		myFlowers: player.flowers,
 		mySeatWind: player.seatWind,
+		myAssistMode: player.assistMode,
+		myLastDrawnTileId: isMyTurn && game.turnEntrySource === 'draw' ? (game.lastDrawnTileId ?? null) : null,
 		isMyTurn,
 		turnPhase: game.turnPhase,
 		canDeclareSelfDrawWin: canWin,
@@ -510,6 +513,7 @@ function getStateForPlayer(game, playerId) {
 			handCount: p.hand.length,
 			melds: p.melds,
 			flowers: p.flowers,
+			assistMode: p.assistMode,
 			isDealer: game.players[game.dealerIndex]?.id === p.id,
 			isCurrent: game.status === 'playing' && currentPlayer(game)?.id === p.id,
 			disconnected: p.disconnected ?? false,
@@ -582,6 +586,7 @@ function addPlayer(game, socket, playerName, playerId) {
 		melds: [],
 		flowers: [],
 		seatWind: null,
+		assistMode: 'regular',
 		disconnected: false,
 		socket
 	});
@@ -646,18 +651,28 @@ function chatMessage(game, playerId, text) {
 	broadcastState(game);
 }
 
+const ASSIST_MODES = ['regular', 'hint', 'learning'];
+
+function setAssistMode(game, socket, mode) {
+	const player = game.players.find((p) => p.id === socket.id);
+	if (!player) return;
+	if (!ASSIST_MODES.includes(mode)) return socket.emit('error', 'Unknown assist mode');
+	player.assistMode = mode;
+	broadcastState(game);
+}
+
 // ---------- dealing & turn flow ----------
 
 function drawTileForPlayer(game, player) {
 	while (true) {
-		if (game.wall.length === 0) return false;
+		if (game.wall.length === 0) return null;
 		const tile = game.wall.pop();
 		if (tile.suit === 'flower') {
 			player.flowers.push(tile);
 			continue;
 		}
 		player.hand.push(tile);
-		return true;
+		return tile;
 	}
 }
 
@@ -677,10 +692,11 @@ function dealHand(game) {
 	for (let round = 0; round < 13; round++) {
 		for (const p of game.players) drawTileForPlayer(game, p);
 	}
-	drawTileForPlayer(game, game.players[game.dealerIndex]);
+	const dealerLastTile = drawTileForPlayer(game, game.players[game.dealerIndex]);
 	game.currentPlayerIndex = game.dealerIndex;
 	game.turnPhase = 'awaitingDiscard';
 	game.turnEntrySource = 'draw';
+	game.lastDrawnTileId = dealerLastTile?.id ?? null;
 	game.status = 'playing';
 }
 
@@ -727,6 +743,7 @@ function handleDraw(game, socket) {
 	if (!drew) return endHandDraw(game);
 	game.turnPhase = 'awaitingDiscard';
 	game.turnEntrySource = 'draw';
+	game.lastDrawnTileId = drew.id;
 	log(game, `${player.name} drew a tile`);
 	broadcastState(game);
 }
@@ -878,9 +895,11 @@ function executePongKongClaim(game, pc, winnerId) {
 		const drew = drawTileForPlayer(game, player);
 		if (!drew) return endHandDraw(game);
 		game.turnEntrySource = 'draw';
+		game.lastDrawnTileId = drew.id;
 		log(game, `${player.name} drew a replacement tile`);
 	} else {
 		game.turnEntrySource = 'claim';
+		game.lastDrawnTileId = null;
 	}
 	game.turnPhase = 'awaitingDiscard';
 	broadcastState(game);
@@ -903,6 +922,7 @@ function executeChiClaim(game, pc, playerId) {
 	game.currentPlayerIndex = game.players.findIndex((p) => p.id === playerId);
 	game.turnPhase = 'awaitingDiscard';
 	game.turnEntrySource = 'claim';
+	game.lastDrawnTileId = null;
 	broadcastState(game);
 }
 
@@ -922,6 +942,7 @@ function handleDeclareConcealedKong(game, socket, suit, rank) {
 	const drew = drawTileForPlayer(game, player);
 	if (!drew) return endHandDraw(game);
 	game.turnEntrySource = 'draw';
+	game.lastDrawnTileId = drew.id;
 	broadcastState(game);
 }
 
@@ -942,6 +963,7 @@ function handleDeclarePromotedKong(game, socket, meldIndex) {
 	const drew = drawTileForPlayer(game, player);
 	if (!drew) return endHandDraw(game);
 	game.turnEntrySource = 'draw';
+	game.lastDrawnTileId = drew.id;
 	broadcastState(game);
 }
 
@@ -1078,6 +1100,11 @@ export default function injectSocketIO(server) {
 			const roomId = socketRoom.get(socket.id);
 			const game = roomId && games.get(roomId);
 			if (game) handleWinSelfDraw(game, socket);
+		});
+		socket.on('setAssistMode', ({ mode }) => {
+			const roomId = socketRoom.get(socket.id);
+			const game = roomId && games.get(roomId);
+			if (game) setAssistMode(game, socket, mode);
 		});
 		socket.on('chatMessage', ({ text }) => {
 			const roomId = socketRoom.get(socket.id);
