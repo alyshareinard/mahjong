@@ -32,27 +32,33 @@
 		waitingOn: string[];
 	};
 
-	type FanDetail = { name: string; value: number };
+	type ScoreDetail = { name: string; value: number };
+	type DoubleDetail = { name: string; count: number };
 
-	type WinnerResult = {
+	type PlayerScore = {
 		playerId: string;
 		name: string;
-		fan: number;
-		points: number;
-		detail: FanDetail[];
-		method: string;
-		selfDraw: boolean;
+		score: number;
+		basic: number;
+		doubles: number;
+		rawScore: number;
+		detail: ScoreDetail[];
+		doubleDetail: DoubleDetail[];
+		payment: number;
 	};
 
 	type RevealedHand = { id: string; name: string; hand: TileT[]; melds: Meld[]; flowers: TileT[] };
 
 	type HandResult = {
 		draw: boolean;
-		winners: WinnerResult[];
-		discarderId?: string | null;
-		discarderName?: string;
-		discardTile?: TileT;
+		winnerId: string | null;
+		winnerName: string | null;
+		selfDraw: boolean;
+		discarderId: string | null;
+		discarderName: string | null;
+		winningTile: TileT | null;
 		handNumber: number;
+		scores: PlayerScore[];
 		revealedHands: RevealedHand[];
 	};
 
@@ -239,10 +245,8 @@
 		return current ? `Waiting for ${current.name}` : 'Waiting...';
 	}
 
-	function methodLabel(method: string) {
-		if (method === 'sevenPairs') return 'Seven Pairs';
-		if (method === 'thirteenOrphans') return 'Thirteen Orphans';
-		return 'Standard Hand';
+	function scoreFor(result: HandResult, playerId: string): PlayerScore | undefined {
+		return result.scores.find((s) => s.playerId === playerId);
 	}
 </script>
 
@@ -482,27 +486,38 @@
 		<div class="flex flex-col items-center gap-4 bg-slate-800 rounded-2xl p-6 sm:p-8 shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto">
 			{#if result.draw}
 				<p class="text-2xl font-bold text-center">Wall exhausted — no winner</p>
+				<p class="text-sm text-emerald-200 text-center">Everyone settles on what they were holding.</p>
 			{:else}
-				{#each result.winners as winner}
-					<div class="text-center">
-						<p class="text-2xl font-bold text-amber-300">
-							{winner.name} wins {winner.selfDraw ? 'by self-draw' : `off ${result.discarderName}'s discard`}!
-						</p>
-						<p class="text-lg text-emerald-200">{methodLabel(winner.method)} · {winner.fan} fan · {winner.points} points</p>
-						<div class="text-xs text-slate-300 mt-1">
-							{#each winner.detail as d}
-								<span class="inline-block bg-black/30 rounded px-2 py-0.5 m-0.5">{d.name} +{d.value}</span>
-							{/each}
-						</div>
-					</div>
-				{/each}
+				<p class="text-2xl font-bold text-amber-300 text-center">
+					{result.winnerName} wins {result.selfDraw ? 'by self-draw' : `off ${result.discarderName}'s discard`}!
+				</p>
+				<p class="text-lg text-emerald-200">{scoreFor(result, result.winnerId ?? '')?.score} points</p>
 			{/if}
 
-			<div class="w-full space-y-1">
-				{#each gameState.players as player}
-					<div class="bg-black/20 rounded-lg p-2 flex items-center justify-between text-sm">
-						<span class="font-semibold">{player.name}{player.id === gameState.myPlayerId ? ' (you)' : ''}</span>
-						<span class="text-emerald-200">{player.totalScore} pts</span>
+			<div class="w-full space-y-2">
+				{#each result.scores as s}
+					<div class="bg-black/20 rounded-lg p-3 text-sm">
+						<div class="flex items-center justify-between font-semibold">
+							<span>
+								{s.name}{s.playerId === gameState.myPlayerId ? ' (you)' : ''}
+								{#if s.playerId === result.winnerId}<span class="text-amber-300"> · winner</span>{/if}
+							</span>
+							<span class:text-emerald-300={s.payment > 0} class:text-red-300={s.payment < 0}>
+								{s.payment > 0 ? '+' : ''}{s.payment}
+							</span>
+						</div>
+						<p class="text-xs text-slate-300 mt-1">
+							Score: {s.basic} basic{s.doubles > 0 ? ` × 2^${s.doubles}` : ''} = {s.rawScore}{s.rawScore !== s.score ? ` (capped at ${s.score})` : ''}
+						</p>
+						<div class="text-xs text-slate-400 mt-1">
+							{#each s.detail as d}
+								<span class="inline-block bg-black/30 rounded px-1.5 py-0.5 m-0.5">{d.name} +{d.value}</span>
+							{/each}
+							{#each s.doubleDetail as d}
+								<span class="inline-block bg-purple-900/40 rounded px-1.5 py-0.5 m-0.5">{d.name} ×2{d.count > 1 ? ` (${d.count})` : ''}</span>
+							{/each}
+						</div>
+						<p class="text-xs text-emerald-200 mt-1">Running total: {gameState.players.find((p) => p.id === s.playerId)?.totalScore ?? 0}</p>
 					</div>
 				{/each}
 			</div>
@@ -535,25 +550,38 @@
 {#if showRules}
 	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onclick={() => (showRules = false)}>
 		<div class="bg-slate-800 rounded-2xl p-6 shadow-2xl max-w-md w-full max-h-[85vh] overflow-y-auto text-sm" onclick={(e) => e.stopPropagation()}>
-			<h2 class="font-bold text-lg mb-3">Scoring guide (simplified Hong Kong rules)</h2>
-			<ul class="space-y-1 text-slate-200">
-				<li>Seven Pairs — 4 fan</li>
-				<li>Thirteen Orphans — 13 fan (limit)</li>
-				<li>All Chow (no pungs) — 1 fan</li>
-				<li>All Pungs — 3 fan</li>
-				<li>Mixed One Suit (+ honors) — 3 fan</li>
-				<li>Pure One Suit — 7 fan</li>
-				<li>All Honors — 10 fan</li>
-				<li>Each Dragon Pung/Kong — 1 fan</li>
-				<li>Small / Great Dragons — 5 / 8 fan</li>
-				<li>Seat or Round Wind Pung — 1 fan each</li>
-				<li>Small / Great Winds — 6 / 13 fan</li>
-				<li>Self-Draw — 1 fan</li>
-				<li>Fully Concealed Hand — 1 fan</li>
-				<li>Each Flower/Season — 1 fan (+1 more if it matches your seat)</li>
+			<h2 class="font-bold text-lg mb-3">Scoring guide</h2>
+			<p class="text-slate-300 mb-2">From <em>The Mah Jong Player's Companion</em>. Every hand — winner or not — is scored, then everyone settles up.</p>
+
+			<p class="font-semibold text-slate-100 mt-3 mb-1">Basic score (per meld/pair)</p>
+			<ul class="space-y-0.5 text-slate-200 text-xs">
+				<li>Pung, minor (2-8): 2 exposed / 4 concealed</li>
+				<li>Pung, major (1s, 9s, winds, dragons): 4 exposed / 8 concealed</li>
+				<li>Kong, minor: 8 exposed / 16 concealed</li>
+				<li>Kong, major: 16 exposed / 32 concealed</li>
+				<li>Chow: 0</li>
+				<li>Pair of your own wind, the round wind, or any dragon: 2 each</li>
+				<li>Each flower or season held: 4</li>
+				<li>Going Mah-Jong: 20 (+2 more if self-drawn)</li>
 			</ul>
-			<p class="mt-3 text-slate-300">Minimum 1 fan (excluding flowers) is required to win. Fan doubles points per level (1 fan = 1pt, 2 = 2pt... capped at 32, limit hands = 64).</p>
-			<p class="mt-2 text-slate-300">Self-draw: every other player pays the winner. Discard win: only the discarder pays (3x the point value either way).</p>
+
+			<p class="font-semibold text-slate-100 mt-3 mb-1">Doubles (basic score × 2 per double)</p>
+			<ul class="space-y-0.5 text-slate-200 text-xs">
+				<li>Pung/kong of your own wind, the round wind, or any dragon</li>
+				<li>Holding your own flower or season</li>
+				<li>A complete set of all 4 flowers, or all 4 seasons: 2 doubles</li>
+				<li>Winner only: no chows in the hand</li>
+				<li>Winner only: all one suit (with winds/dragons allowed)</li>
+				<li>Winner only: all 1s, 9s, winds and dragons</li>
+				<li>Winner only: fully concealed hand</li>
+				<li>Winner only: won with the last tile from the wall, or the final discard</li>
+			</ul>
+			<p class="mt-2 text-slate-300 text-xs">Score is capped at a limit of 1000 points.</p>
+
+			<p class="font-semibold text-slate-100 mt-3 mb-1">Settling up</p>
+			<p class="text-slate-300 text-xs">The winner collects their full score from each of the other three players. If nobody wins (wall exhausted), all four players instead settle the <em>difference</em> between their own scores with each other. Any payment to or from East Wind is doubled.</p>
+
+			<p class="mt-3 text-amber-200/80 text-xs">Not yet implemented: "fishing" (calling-hand) bonuses, robbing the kong, and the book's ~150 named special hands — those score via this same basic system for now.</p>
 			<button onclick={() => (showRules = false)} class="mt-4 w-full py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg font-semibold transition-colors touch-manipulation">Got it</button>
 		</div>
 	</div>

@@ -4,16 +4,12 @@ import { Server } from 'socket.io';
 const SUITS_NUM = ['characters', 'bamboo', 'dots'];
 const WIND_RANKS = ['E', 'S', 'W', 'N'];
 const DRAGON_RANKS = ['red', 'green', 'white'];
-const MIN_CORE_FAN = 1;
 const CLAIM_WINDOW_MS = 20000;
-const FLOWER_SEAT_BY_RANK = { 1: 'E', 2: 'S', 3: 'W', 4: 'N' };
+const OWN_FLOWER_RANK = { E: 1, S: 2, W: 3, N: 4 };
 const SUIT_RANK_ORDER = { characters: 0, bamboo: 1, dots: 2, wind: 3, dragon: 4 };
 const WIND_SEQ = { E: 0, S: 1, W: 2, N: 3 };
 const DRAGON_SEQ = { red: 0, green: 1, white: 2 };
-const ORPHAN_KEYS = [
-	'characters-1', 'characters-9', 'bamboo-1', 'bamboo-9', 'dots-1', 'dots-9',
-	'wind-E', 'wind-S', 'wind-W', 'wind-N', 'dragon-red', 'dragon-green', 'dragon-white'
-];
+const LIMIT = 1000;
 
 // ---------- tiles & wall ----------
 
@@ -137,121 +133,237 @@ function findWinCandidates(concealedTiles, meldsNeeded) {
 	return candidates;
 }
 
-function isSevenPairs(tiles) {
-	if (tiles.length !== 14) return false;
-	const counts = tallyCounts(tiles);
-	const values = Object.values(counts);
-	return values.length === 7 && values.every((c) => c === 2);
-}
+// ---------- basic scoring (The Mah Jong Player's Companion, pp.22-25) ----------
+// Every hand (winning or not) is scored on its own pungs/kongs/pairs, doubled for
+// certain conditions, capped at LIMIT. The winner then collects their full score
+// from each opponent; non-winners settle the difference between their own scores.
+// East Wind always pays and receives double. "Fishing"/calling-hand bonuses,
+// robbing-the-kong, and the ~150-hand named-pattern list are intentionally not
+// implemented yet — see conversation history for why.
 
-function isThirteenOrphans(tiles) {
-	if (tiles.length !== 14) return false;
-	const counts = tallyCounts(tiles);
-	const keys = Object.keys(counts);
-	if (keys.length !== 13) return false;
-	for (const k of keys) if (!ORPHAN_KEYS.includes(k)) return false;
-	for (const k of ORPHAN_KEYS) if (!counts[k]) return false;
-	return true;
-}
-
-function calculateFan(melds, pairKey, context) {
-	if (context.method === 'thirteenOrphans') {
-		return { fan: 13, detail: [{ name: 'Thirteen Orphans', value: 13 }] };
+function isMajorTile(tile) {
+	if (tile.suit === 'wind' || tile.suit === 'dragon') return true;
+	if (tile.suit === 'characters' || tile.suit === 'bamboo' || tile.suit === 'dots') {
+		return tile.rank === 1 || tile.rank === 9;
 	}
+	return false;
+}
 
+function meldPoints(meld) {
+	if (meld.type === 'chow') return 0;
+	const major = isMajorTile(meld.tiles[0]);
+	if (meld.type === 'pung') return meld.concealed ? (major ? 8 : 4) : major ? 4 : 2;
+	return meld.concealed ? (major ? 32 : 16) : major ? 16 : 8; // kong
+}
+
+function pairBonusPoints(pairKey, player, game) {
+	const [suit, rank] = pairKey.split('-');
+	if (suit === 'dragon') return 2;
+	if (suit === 'wind') {
+		let pts = 0;
+		if (rank === player.seatWind) pts += 2;
+		if (rank === game.roundWind) pts += 2;
+		return pts;
+	}
+	return 0;
+}
+
+// Best-effort decomposition of a (possibly incomplete) concealed hand into
+// pungs/kongs + one bonus-worthy pair, for scoring non-winning hands at hand-end.
+function extractMeldsForScoring(hand) {
+	const counts = tallyCounts(hand);
+	const melds = [];
+	const usedIds = new Set();
+	function takeN(key, n) {
+		const tiles = hand.filter((t) => !usedIds.has(t.id) && tileKeyOf(t) === key).slice(0, n);
+		for (const t of tiles) usedIds.add(t.id);
+		return tiles;
+	}
+	const sortedKeys = Object.keys(counts).sort((a, b) => keyOrder(a) - keyOrder(b));
+	for (const key of sortedKeys) {
+		if (counts[key] >= 4) {
+			melds.push({ type: 'kong', concealed: true, tiles: takeN(key, 4) });
+			counts[key] -= 4;
+		}
+	}
+	for (const key of sortedKeys) {
+		if (counts[key] >= 3) {
+			melds.push({ type: 'pung', concealed: true, tiles: takeN(key, 3) });
+			counts[key] -= 3;
+		}
+	}
+	let pairKey = null;
+	for (const key of sortedKeys) {
+		if (counts[key] >= 2) {
+			if (!pairKey) pairKey = key;
+			if (key.startsWith('dragon-') || key.startsWith('wind-')) {
+				pairKey = key;
+				break;
+			}
+		}
+	}
+	return { melds, pairKey };
+}
+
+function computeHandScore(game, player, opts) {
+	const { isWinner, selfDraw, wonWithLastWallTile, wonWithFinalDiscard, winningMelds, winningPairKey } = opts;
 	const detail = [];
-	let fan = 0;
-	function add(name, value) {
-		fan += value;
-		detail.push({ name, value });
+	let basic = 0;
+	function addBasic(name, value) {
+		if (value) {
+			basic += value;
+			detail.push({ name, value });
+		}
+	}
+	const doubleDetail = [];
+	let doubles = 0;
+	function addDouble(name, count = 1) {
+		doubles += count;
+		doubleDetail.push({ name, count });
 	}
 
-	if (context.method === 'sevenPairs') {
-		add('Seven Pairs', 4);
+	let melds, pairKey;
+	if (isWinner) {
+		melds = winningMelds;
+		pairKey = winningPairKey;
 	} else {
-		const allChow = melds.every((m) => m.type === 'chow');
-		const allPungKong = melds.every((m) => m.type === 'pung' || m.type === 'kong');
-		if (allChow) add('All Chow', 1);
-		if (allPungKong) add('All Pungs', 3);
+		const extracted = extractMeldsForScoring(player.hand);
+		melds = [...player.melds.map((m) => ({ type: m.type, concealed: m.concealed, tiles: m.tiles })), ...extracted.melds];
+		pairKey = extracted.pairKey;
 	}
 
-	const suitedSuits = new Set();
-	let hasHonor = false;
-	for (const key of [...melds.flatMap((m) => m.keys), pairKey]) {
-		const suit = key.split('-')[0];
-		if (suit === 'wind' || suit === 'dragon') hasHonor = true;
-		else suitedSuits.add(suit);
+	for (const m of melds) {
+		const pts = meldPoints(m);
+		if (pts > 0) addBasic(`${m.concealed ? 'Concealed' : 'Exposed'} ${m.type} of ${describeTile(m.tiles[0])}`, pts);
 	}
-	if (suitedSuits.size === 0 && hasHonor) add('All Honors', 10);
-	else if (suitedSuits.size === 1 && !hasHonor) add('Pure One Suit', 7);
-	else if (suitedSuits.size === 1 && hasHonor) add('Mixed One Suit', 3);
-
-	const dragonSets = melds.filter((m) => (m.type === 'pung' || m.type === 'kong') && m.keys[0].startsWith('dragon-'));
-	for (const d of dragonSets) add(`Dragon Pung (${d.keys[0].split('-')[1]})`, 1);
-	if (dragonSets.length === 3) add('Great Dragons', 8);
-	else if (dragonSets.length === 2 && pairKey.startsWith('dragon-')) add('Small Dragons', 5);
-
-	const windSets = melds.filter((m) => (m.type === 'pung' || m.type === 'kong') && m.keys[0].startsWith('wind-'));
-	for (const w of windSets) {
-		const wind = w.keys[0].split('-')[1];
-		if (wind === context.seatWind) add('Seat Wind Pung', 1);
-		if (wind === context.roundWind) add('Round Wind Pung', 1);
+	if (pairKey) {
+		const [pSuit, pRank] = pairKey.split('-');
+		const pts = pairBonusPoints(pairKey, player, game);
+		if (pts > 0) addBasic(`Pair of ${describeTile({ suit: pSuit, rank: pSuit === 'wind' || pSuit === 'dragon' ? pRank : parseInt(pRank, 10) })}`, pts);
 	}
-	if (windSets.length === 4) add('Great Winds', 13);
-	else if (windSets.length === 3 && pairKey.startsWith('wind-')) add('Small Winds', 6);
+	if (player.flowers.length > 0) addBasic(`Flowers/Seasons x${player.flowers.length}`, player.flowers.length * 4);
+	if (isWinner) {
+		addBasic('Going Mah-Jong', 20);
+		if (selfDraw) addBasic('Drew winning tile from wall', 2);
+	}
 
-	if (context.selfDraw) add('Self-Draw', 1);
-	if (context.fullyConcealed) add('Fully Concealed Hand', 1);
+	for (const m of melds) {
+		if (m.type === 'chow') continue;
+		const key = tileKeyOf(m.tiles[0]);
+		if (key.startsWith('dragon-')) addDouble(`Dragon ${m.type}`);
+		if (key.startsWith('wind-')) {
+			const w = key.split('-')[1];
+			if (w === player.seatWind) addDouble(`Own wind ${m.type}`);
+			if (w === game.roundWind) addDouble(`Round wind ${m.type}`);
+		}
+	}
+	const ownFlowerRank = OWN_FLOWER_RANK[player.seatWind];
+	if (player.flowers.some((f) => f.kind === 'flower' && f.rank === ownFlowerRank)) addDouble('Holding own Flower');
+	if (player.flowers.some((f) => f.kind === 'season' && f.rank === ownFlowerRank)) addDouble('Holding own Season');
+	if ([1, 2, 3, 4].every((n) => player.flowers.some((f) => f.kind === 'flower' && f.rank === n))) addDouble('Complete set of Flowers', 2);
+	if ([1, 2, 3, 4].every((n) => player.flowers.some((f) => f.kind === 'season' && f.rank === n))) addDouble('Complete set of Seasons', 2);
 
-	const flowerCount = context.flowers.length;
-	if (flowerCount > 0) add(`Flower Bonus x${flowerCount}`, flowerCount);
-	const ownFlowerCount = context.flowers.filter((f) => f.own).length;
-	if (ownFlowerCount > 0) add('Own-Seat Flower Bonus', ownFlowerCount);
+	if (isWinner) {
+		if (melds.every((m) => m.type !== 'chow')) addDouble('No chows');
+		const allKeys = [...melds.flatMap((m) => m.tiles.map(tileKeyOf)), pairKey];
+		const suits = new Set(allKeys.map((k) => k.split('-')[0]).filter((s) => s !== 'wind' && s !== 'dragon'));
+		if (suits.size === 1) addDouble('All one suit with Winds/Dragons');
+		const allTerminalOrHonor = allKeys.every((k) => {
+			const [s, r] = k.split('-');
+			return s === 'wind' || s === 'dragon' || r === '1' || r === '9';
+		});
+		if (allTerminalOrHonor) addDouble('All 1s and 9s with Winds/Dragons');
+		if (melds.every((m) => m.concealed)) addDouble('Fully concealed hand');
+		if (wonWithLastWallTile) addDouble('Won with last tile from wall');
+		if (wonWithFinalDiscard) addDouble('Won with final discard');
+	}
 
-	return { fan, detail };
+	const rawScore = Math.round(basic * Math.pow(2, doubles));
+	const cappedScore = Math.min(rawScore, LIMIT);
+	return { basic, doubles, detail, doubleDetail, rawScore, cappedScore };
 }
 
-function annotateFlowers(player) {
-	return player.flowers.map((f) => ({ own: FLOWER_SEAT_BY_RANK[f.rank] === player.seatWind }));
+// Settle a hand: winner receives their full score from each opponent; non-winners
+// settle the difference between their own scores. Any transaction involving East
+// Wind (paying or receiving) is doubled. Works for the no-winner (draw) case too,
+// since every pair then just falls through to the "settle the difference" branch.
+function settleHand(game, scores, winnerId) {
+	const payments = {};
+	for (const p of game.players) payments[p.id] = 0;
+	for (let i = 0; i < game.players.length; i++) {
+		for (let j = i + 1; j < game.players.length; j++) {
+			const a = game.players[i];
+			const b = game.players[j];
+			const multiplier = a.seatWind === 'E' || b.seatWind === 'E' ? 2 : 1;
+			let amount;
+			let aGains;
+			if (winnerId === a.id) {
+				amount = scores[a.id];
+				aGains = true;
+			} else if (winnerId === b.id) {
+				amount = scores[b.id];
+				aGains = false;
+			} else if (scores[a.id] >= scores[b.id]) {
+				amount = scores[a.id] - scores[b.id];
+				aGains = true;
+			} else {
+				amount = scores[b.id] - scores[a.id];
+				aGains = false;
+			}
+			amount *= multiplier;
+			if (aGains) {
+				payments[a.id] += amount;
+				payments[b.id] -= amount;
+			} else {
+				payments[b.id] += amount;
+				payments[a.id] -= amount;
+			}
+		}
+	}
+	return payments;
 }
 
-function findBestWin(player, extraTile, context) {
+// ---------- ordinary-hand win detection (Four P/K + Pr, any suits) ----------
+
+function resolveWinShape(concealedTiles, pairKey, keyMelds) {
+	const pool = [...concealedTiles];
+	function takeByKey(key) {
+		const idx = pool.findIndex((t) => tileKeyOf(t) === key);
+		const [t] = pool.splice(idx, 1);
+		return t;
+	}
+	const melds = keyMelds.map((m) => ({ type: m.type, concealed: true, tiles: m.keys.map(takeByKey) }));
+	takeByKey(pairKey);
+	takeByKey(pairKey);
+	return melds;
+}
+
+function findAllOrdinaryWinShapes(player, extraTile) {
 	const concealed = extraTile ? [...player.hand, extraTile] : player.hand.slice();
 	const meldsNeeded = 4 - player.melds.length;
-	const exposed = player.melds.map((m) => ({ type: m.type, keys: m.tiles.map(tileKeyOf) }));
-	const candidates = [];
-
-	if (concealed.length === meldsNeeded * 3 + 2) {
-		for (const c of findWinCandidates(concealed, meldsNeeded)) {
-			candidates.push({ method: 'standard', melds: [...exposed, ...c.melds], pair: c.pairKey });
-		}
-	}
-	if (player.melds.length === 0 && concealed.length === 14) {
-		if (isSevenPairs(concealed)) {
-			const keys = Object.keys(tallyCounts(concealed));
-			candidates.push({ method: 'sevenPairs', melds: keys.map((k) => ({ type: 'pair', keys: [k, k] })), pair: keys[0] });
-		}
-		if (isThirteenOrphans(concealed)) {
-			candidates.push({ method: 'thirteenOrphans', melds: [], pair: '' });
-		}
-	}
-	if (candidates.length === 0) return null;
-
-	let best = null;
-	for (const c of candidates) {
-		const fanResult = calculateFan(c.melds, c.pair, { ...context, method: c.method });
-		const flowerFan = context.flowers.length + context.flowers.filter((f) => f.own).length;
-		const coreFan = fanResult.fan - flowerFan;
-		if (c.method !== 'thirteenOrphans' && coreFan < MIN_CORE_FAN) continue;
-		if (!best || fanResult.fan > best.fan) best = { fan: fanResult.fan, detail: fanResult.detail, method: c.method };
-	}
-	return best;
+	if (concealed.length !== meldsNeeded * 3 + 2) return [];
+	const exposed = player.melds.map((m) => ({ type: m.type, concealed: m.concealed, tiles: m.tiles }));
+	const candidates = findWinCandidates(concealed, meldsNeeded);
+	return candidates.map((c) => ({
+		melds: [...exposed, ...resolveWinShape(concealed, c.pairKey, c.melds)],
+		pairKey: c.pairKey
+	}));
 }
 
-function fanToPoints(fan) {
-	if (fan >= 13) return 64;
-	if (fan < 1) return 0;
-	return Math.min(Math.pow(2, fan - 1), 32);
+function bestOrdinaryWinScore(game, player, extraTile, scoreContext) {
+	const shapes = findAllOrdinaryWinShapes(player, extraTile);
+	if (shapes.length === 0) return null;
+	let best = null;
+	for (const shape of shapes) {
+		const result = computeHandScore(game, player, {
+			...scoreContext,
+			isWinner: true,
+			winningMelds: shape.melds,
+			winningPairKey: shape.pairKey
+		});
+		if (!best || result.rawScore > best.rawScore) best = result;
+	}
+	return best;
 }
 
 function findTileInHand(hand, suit, rank) {
@@ -362,13 +474,7 @@ function getStateForPlayer(game, playerId) {
 	const isMyTurn = game.status === 'playing' && currentPlayer(game)?.id === playerId;
 	const canWin =
 		isMyTurn && game.turnPhase === 'awaitingDiscard' && game.turnEntrySource === 'draw'
-			? !!findBestWin(player, null, {
-					selfDraw: true,
-					seatWind: player.seatWind,
-					roundWind: game.roundWind,
-					fullyConcealed: player.melds.length === 0,
-					flowers: annotateFlowers(player)
-				})
+			? findAllOrdinaryWinShapes(player, null).length > 0
 			: false;
 
 	return {
@@ -639,15 +745,8 @@ function discardTile(game, socket, tileId) {
 
 function computeClaimOptions(game, player, discardTile, isImmediateNext) {
 	const matching = player.hand.filter((t) => t.suit === discardTile.suit && t.rank === discardTile.rank);
-	const winCheck = findBestWin(player, discardTile, {
-		selfDraw: false,
-		seatWind: player.seatWind,
-		roundWind: game.roundWind,
-		fullyConcealed: player.melds.length === 0,
-		flowers: annotateFlowers(player)
-	});
 	return {
-		canHu: !!winCheck,
+		canHu: findAllOrdinaryWinShapes(player, discardTile).length > 0,
 		canPong: matching.length >= 2,
 		canKong: matching.length >= 3,
 		chiOptions: isImmediateNext ? getChiOptions(player.hand, discardTile) : []
@@ -722,7 +821,20 @@ function resolveClaims(game) {
 	for (const id of pc.eligiblePlayerIds) if (!pc.responses[id]) pc.responses[id] = { type: 'pass' };
 
 	const huIds = pc.eligiblePlayerIds.filter((id) => pc.responses[id].type === 'hu');
-	if (huIds.length > 0) return endHandWithDiscardWin(game, pc, huIds);
+	if (huIds.length > 0) {
+		// This settlement system assumes a single winner per hand; if more than one
+		// player could win off the same discard, priority goes to whoever is closest
+		// to the discarder in turn order (same tie-break as pong/kong).
+		let winnerId = null;
+		for (let offset = 1; offset <= 3; offset++) {
+			const candidate = game.players[(pc.discarderIdx + offset) % 4].id;
+			if (huIds.includes(candidate)) {
+				winnerId = candidate;
+				break;
+			}
+		}
+		return endHandWithDiscardWin(game, pc, winnerId);
+	}
 
 	const pongKongIds = pc.eligiblePlayerIds.filter((id) => ['pong', 'kong'].includes(pc.responses[id].type));
 	if (pongKongIds.length > 0) {
@@ -839,85 +951,82 @@ function handleWinSelfDraw(game, socket) {
 	if (game.turnPhase !== 'awaitingDiscard' || game.turnEntrySource !== 'draw') {
 		return socket.emit('error', 'Cannot declare win now');
 	}
-	const context = {
-		selfDraw: true,
-		seatWind: player.seatWind,
-		roundWind: game.roundWind,
-		fullyConcealed: player.melds.length === 0,
-		flowers: annotateFlowers(player)
-	};
-	const win = findBestWin(player, null, context);
-	if (!win) return socket.emit('error', 'Not a winning hand');
-	endHandWithSelfDrawWin(game, player, win);
+	const wonWithLastWallTile = game.wall.length === 0;
+	const result = bestOrdinaryWinScore(game, player, null, { selfDraw: true, wonWithLastWallTile, wonWithFinalDiscard: false });
+	if (!result) return socket.emit('error', 'Not a winning hand');
+	endHand(game, { winnerId: player.id, winnerResult: result, selfDraw: true, discarderId: null, winningTile: null });
 }
 
 function revealedHands(game) {
 	return game.players.map((p) => ({ id: p.id, name: p.name, hand: p.hand, melds: p.melds, flowers: p.flowers }));
 }
 
-function endHandWithSelfDrawWin(game, player, win) {
-	const points = fanToPoints(win.fan);
-	for (const o of game.players) {
-		if (o.id === player.id) continue;
-		game.totalScores[o.id] = (game.totalScores[o.id] || 0) - points;
-	}
-	game.totalScores[player.id] = (game.totalScores[player.id] || 0) + points * 3;
-	game.status = 'roundOver';
-	game.pendingClaim = null;
-	game.dealerRetained = player.id === game.players[game.dealerIndex].id;
-	game.result = {
-		draw: false,
-		winners: [{ playerId: player.id, name: player.name, fan: win.fan, points, detail: win.detail, method: win.method, selfDraw: true }],
-		discarderId: null,
-		handNumber: game.handNumber,
-		revealedHands: revealedHands(game)
-	};
-	log(game, `${player.name} wins by self-draw! (${win.fan} fan)`);
-	broadcastState(game);
-}
-
-function endHandWithDiscardWin(game, pc, huIds) {
+function endHandWithDiscardWin(game, pc, winnerId) {
 	const discard = pc.discardTile;
 	const discarder = game.players.find((p) => p.id === pc.discarderId);
-	const winners = [];
-	for (const id of huIds) {
-		const player = game.players.find((p) => p.id === id);
-		const context = {
-			selfDraw: false,
-			seatWind: player.seatWind,
-			roundWind: game.roundWind,
-			fullyConcealed: player.melds.length === 0,
-			flowers: annotateFlowers(player)
-		};
-		const win = findBestWin(player, discard, context);
-		if (!win) continue;
-		const points = fanToPoints(win.fan);
-		game.totalScores[discarder.id] = (game.totalScores[discarder.id] || 0) - points * 3;
-		game.totalScores[player.id] = (game.totalScores[player.id] || 0) + points * 3;
-		winners.push({ playerId: id, name: player.name, fan: win.fan, points, detail: win.detail, method: win.method, selfDraw: false });
+	const player = game.players.find((p) => p.id === winnerId);
+	const wonWithFinalDiscard = game.wall.length === 0;
+	const result = bestOrdinaryWinScore(game, player, discard, { selfDraw: false, wonWithLastWallTile: false, wonWithFinalDiscard });
+	if (!result) {
+		// Defensive: canHu was already validated before this claim was accepted, so
+		// this shouldn't happen. If it somehow does, treat it as if everyone passed.
+		return advanceTurnAfterPass(game, pc.discarderIdx);
 	}
-	game.status = 'roundOver';
-	game.pendingClaim = null;
-	game.dealerRetained = winners.some((w) => w.playerId === game.players[game.dealerIndex].id);
-	game.result = {
-		draw: false,
-		winners,
-		discarderId: discarder.id,
-		discarderName: discarder.name,
-		discardTile: discard,
-		handNumber: game.handNumber,
-		revealedHands: revealedHands(game)
-	};
-	log(game, `${winners.map((w) => w.name).join(' and ')} won off ${discarder.name}'s discard!`);
-	broadcastState(game);
+	endHand(game, { winnerId, winnerResult: result, selfDraw: false, discarderId: discarder.id, winningTile: discard });
 }
 
 function endHandDraw(game) {
+	endHand(game, { winnerId: null, winnerResult: null, selfDraw: false, discarderId: null, winningTile: null });
+}
+
+// Scores every player's hand, settles the hand (winner collects full score from
+// each opponent; non-winners settle their difference; East doubles), and updates
+// running totals. Handles the no-winner (wall exhausted) case too, since every
+// pairwise settlement then falls through to the "settle the difference" branch.
+function endHand(game, { winnerId, winnerResult, selfDraw, discarderId, winningTile }) {
+	const scores = {};
+	const scoreResults = {};
+	for (const p of game.players) {
+		const result = p.id === winnerId ? winnerResult : computeHandScore(game, p, { isWinner: false });
+		scores[p.id] = result.cappedScore;
+		scoreResults[p.id] = result;
+	}
+	const payments = settleHand(game, scores, winnerId);
+	for (const p of game.players) {
+		game.totalScores[p.id] = (game.totalScores[p.id] || 0) + payments[p.id];
+	}
 	game.status = 'roundOver';
 	game.pendingClaim = null;
-	game.dealerRetained = true;
-	game.result = { draw: true, winners: [], handNumber: game.handNumber, revealedHands: revealedHands(game) };
-	log(game, 'Wall exhausted — hand is a draw');
+	const winner = winnerId ? game.players.find((p) => p.id === winnerId) : null;
+	game.dealerRetained = winnerId ? winnerId === game.players[game.dealerIndex].id : true;
+	const discarderName = discarderId ? game.players.find((p) => p.id === discarderId)?.name : null;
+	game.result = {
+		draw: !winnerId,
+		winnerId: winnerId ?? null,
+		winnerName: winner?.name ?? null,
+		selfDraw: !!selfDraw,
+		discarderId: discarderId ?? null,
+		discarderName,
+		winningTile: winningTile ?? null,
+		handNumber: game.handNumber,
+		scores: game.players.map((p) => ({
+			playerId: p.id,
+			name: p.name,
+			score: scores[p.id],
+			basic: scoreResults[p.id].basic,
+			doubles: scoreResults[p.id].doubles,
+			rawScore: scoreResults[p.id].rawScore,
+			detail: scoreResults[p.id].detail,
+			doubleDetail: scoreResults[p.id].doubleDetail,
+			payment: payments[p.id]
+		})),
+		revealedHands: revealedHands(game)
+	};
+	if (winnerId) {
+		log(game, `${winner.name} wins${selfDraw ? ' by self-draw' : ` off ${discarderName}'s discard`}! (${scores[winnerId]} points)`);
+	} else {
+		log(game, 'Wall exhausted — hand is a draw');
+	}
 	broadcastState(game);
 }
 
