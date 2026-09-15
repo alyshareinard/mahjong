@@ -92,4 +92,13 @@
 	<p class="text-emerald-200/60 text-xs mt-8 text-center max-w-sm">
 		Mahjong needs exactly 4 players. Share your room code with three friends to start.
 	</p>
+
+	<a
+		href="https://buymeacoffee.com/tech.aly"
+		target="_blank"
+		rel="noopener noreferrer"
+		class="mt-6 inline-flex items-center gap-2 px-4 py-2 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-400/30 rounded-lg text-sm text-amber-200 hover:text-amber-100 transition-colors touch-manipulation"
+	>
+		☕ Buy me a coffee
+	</a>
 </div>
