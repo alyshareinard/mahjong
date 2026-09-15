@@ -5,6 +5,7 @@ const SUITS_NUM = ['characters', 'bamboo', 'dots'];
 const WIND_RANKS = ['E', 'S', 'W', 'N'];
 const DRAGON_RANKS = ['red', 'green', 'white'];
 const CLAIM_WINDOW_MS = 20000;
+const DUMMY_DELAY_MS = 700;
 const OWN_FLOWER_RANK = { E: 1, S: 2, W: 3, N: 4 };
 const SUIT_RANK_ORDER = { characters: 0, bamboo: 1, dots: 2, wind: 3, dragon: 4 };
 const WIND_SEQ = { E: 0, S: 1, W: 2, N: 3 };
@@ -427,6 +428,7 @@ function getOrCreateGame(roomId) {
 			turnPhase: 'awaitingDraw',
 			turnEntrySource: 'draw',
 			lastDrawnTileId: null,
+			dummyTimer: null,
 			pendingClaim: null,
 			roundWind: 'E',
 			handNumber: 0,
@@ -464,7 +466,46 @@ function nextIndex(idx) {
 
 function broadcastState(game) {
 	for (const player of game.players) {
+		if (player.isDummy) continue;
 		player.socket.emit('state', getStateForPlayer(game, player.id));
+	}
+	scheduleDummyTurnIfNeeded(game);
+}
+
+// ---------- practice seats (fill empty seats for 1-3 player games) ----------
+// A practice seat gets a real dealt hand like anyone else, but every turn it
+// just draws a tile and immediately discards that exact tile back — its own
+// dealt hand never changes. That keeps seat winds, the round wind, and all
+// scoring math fully intact while giving real players genuine discards to
+// react to (including claiming pong/kong/chi/hu off them), without pretending
+// to be a strategic opponent.
+
+function scheduleDummyTurnIfNeeded(game) {
+	if (game.status !== 'playing') return;
+	if (game.turnPhase !== 'awaitingDraw' && game.turnPhase !== 'awaitingDiscard') return;
+	const player = currentPlayer(game);
+	if (!player?.isDummy) return;
+	if (game.dummyTimer) return;
+	game.dummyTimer = setTimeout(() => {
+		game.dummyTimer = null;
+		runDummyTurn(game);
+	}, DUMMY_DELAY_MS);
+}
+
+function runDummyTurn(game) {
+	if (game.status !== 'playing') return;
+	const player = currentPlayer(game);
+	if (!player?.isDummy) return;
+	if (game.turnPhase === 'awaitingDraw') {
+		const drew = drawTileForPlayer(game, player);
+		if (!drew) return endHandDraw(game);
+		game.turnPhase = 'awaitingDiscard';
+		game.turnEntrySource = 'draw';
+		game.lastDrawnTileId = drew.id;
+		log(game, `${player.name} drew a tile`);
+		broadcastState(game);
+	} else if (game.turnPhase === 'awaitingDiscard') {
+		performDiscard(game, player, game.lastDrawnTileId);
 	}
 }
 
@@ -517,6 +558,7 @@ function getStateForPlayer(game, playerId) {
 			isDealer: game.players[game.dealerIndex]?.id === p.id,
 			isCurrent: game.status === 'playing' && currentPlayer(game)?.id === p.id,
 			disconnected: p.disconnected ?? false,
+			isDummy: p.isDummy ?? false,
 			totalScore: game.totalScores[p.id] ?? 0
 		})),
 		dealerPlayerId: game.players[game.dealerIndex]?.id ?? null,
@@ -588,6 +630,7 @@ function addPlayer(game, socket, playerName, playerId) {
 		seatWind: null,
 		assistMode: 'regular',
 		disconnected: false,
+		isDummy: false,
 		socket
 	});
 	if (game.totalScores[socket.id] === undefined) game.totalScores[socket.id] = 0;
@@ -700,14 +743,44 @@ function dealHand(game) {
 	game.status = 'playing';
 }
 
-function startGame(game, socket) {
+function addDummyPlayers(game) {
+	let dummyCount = 0;
+	while (game.players.length < 4) {
+		dummyCount += 1;
+		const label = game.players.filter((p) => p.isDummy).length + 1;
+		game.players.push({
+			id: `dummy-${game.id}-${label}`,
+			playerId: null,
+			name: `Practice Seat ${label}`,
+			hand: [],
+			melds: [],
+			flowers: [],
+			seatWind: null,
+			assistMode: 'regular',
+			disconnected: false,
+			isDummy: true,
+			socket: null
+		});
+	}
+	return dummyCount;
+}
+
+function startGame(game, socket, fillEmptySeats) {
 	if (game.status !== 'waiting') {
 		socket.emit('error', 'Game already started');
 		return;
 	}
-	if (game.players.length !== 4) {
-		socket.emit('error', 'Mahjong needs exactly 4 players');
+	if (game.players.length < 1) {
+		socket.emit('error', 'Need at least 1 player');
 		return;
+	}
+	if (game.players.length !== 4) {
+		if (!fillEmptySeats) {
+			socket.emit('error', 'Mahjong needs exactly 4 players (or turn on practice seats)');
+			return;
+		}
+		const added = addDummyPlayers(game);
+		log(game, `Filled ${added} empty seat${added === 1 ? '' : 's'} with practice partners.`);
 	}
 	game.dealerIndex = 0;
 	game.handNumber = 1;
@@ -748,16 +821,21 @@ function handleDraw(game, socket) {
 	broadcastState(game);
 }
 
-function discardTile(game, socket, tileId) {
-	const player = currentPlayer(game);
-	if (!player || player.id !== socket.id) return socket.emit('error', 'Not your turn');
-	if (game.turnPhase !== 'awaitingDiscard') return socket.emit('error', 'Not time to discard');
+function performDiscard(game, player, tileId) {
 	const idx = player.hand.findIndex((t) => t.id === tileId);
-	if (idx === -1) return socket.emit('error', 'Tile not in hand');
+	if (idx === -1) return;
 	const [tile] = player.hand.splice(idx, 1);
 	game.discards.push({ tile, playerId: player.id });
 	log(game, `${player.name} discarded ${describeTile(tile)}`);
 	openClaimWindow(game, tile, player.id);
+}
+
+function discardTile(game, socket, tileId) {
+	const player = currentPlayer(game);
+	if (!player || player.id !== socket.id) return socket.emit('error', 'Not your turn');
+	if (game.turnPhase !== 'awaitingDiscard') return socket.emit('error', 'Not time to discard');
+	if (!player.hand.some((t) => t.id === tileId)) return socket.emit('error', 'Tile not in hand');
+	performDiscard(game, player, tileId);
 }
 
 function computeClaimOptions(game, player, discardTile, isImmediateNext) {
@@ -777,7 +855,7 @@ function openClaimWindow(game, discardTile, discarderId) {
 	for (let offset = 1; offset <= 3; offset++) {
 		const idx = (discarderIdx + offset) % 4;
 		const p = game.players[idx];
-		if (p.disconnected) continue;
+		if (p.disconnected || p.isDummy) continue;
 		const opts = computeClaimOptions(game, p, discardTile, offset === 1);
 		if (opts.canHu || opts.canPong || opts.canKong || opts.chiOptions.length > 0) {
 			eligible.push(p.id);
@@ -1006,6 +1084,10 @@ function endHandDraw(game) {
 // running totals. Handles the no-winner (wall exhausted) case too, since every
 // pairwise settlement then falls through to the "settle the difference" branch.
 function endHand(game, { winnerId, winnerResult, selfDraw, discarderId, winningTile }) {
+	if (game.dummyTimer) {
+		clearTimeout(game.dummyTimer);
+		game.dummyTimer = null;
+	}
 	const scores = {};
 	const scoreResults = {};
 	for (const p of game.players) {
@@ -1066,10 +1148,10 @@ export default function injectSocketIO(server) {
 			const game = roomId && games.get(roomId);
 			if (game) removePlayer(game, socket, targetPlayerId);
 		});
-		socket.on('start', () => {
+		socket.on('start', ({ fillEmptySeats } = {}) => {
 			const roomId = socketRoom.get(socket.id);
 			const game = roomId && games.get(roomId);
-			if (game) startGame(game, socket);
+			if (game) startGame(game, socket, !!fillEmptySeats);
 		});
 		socket.on('draw', () => {
 			const roomId = socketRoom.get(socket.id);

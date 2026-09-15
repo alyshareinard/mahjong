@@ -23,6 +23,7 @@
 		isDealer: boolean;
 		isCurrent: boolean;
 		disconnected: boolean;
+		isDummy: boolean;
 		totalScore: number;
 	};
 
@@ -112,6 +113,7 @@
 	let chatLastSeenTimestamp = $state(0);
 	let showDiscardHint = $state(false);
 	let showClaimHint = $state(false);
+	let fillEmptySeats = $state(false);
 
 	let myMeldsNeeded = $derived.by(() => {
 		const g = gameState;
@@ -189,7 +191,7 @@
 	});
 
 	function start() {
-		client?.emit('start');
+		client?.emit('start', { fillEmptySeats });
 	}
 
 	function removePlayerAction(targetPlayerId: string) {
@@ -406,7 +408,27 @@
 						Start game
 					</button>
 				{:else}
-					<p class="text-emerald-200/70 text-sm">Need {4 - gameState.players.length} more player{4 - gameState.players.length === 1 ? '' : 's'} — share the room code.</p>
+					<p class="text-emerald-200/70 text-sm mb-4">Need {4 - gameState.players.length} more player{4 - gameState.players.length === 1 ? '' : 's'} — share the room code, or play with fewer below.</p>
+					<label class="flex items-center justify-center gap-2 text-sm text-emerald-100 mb-3">
+						<input type="checkbox" bind:checked={fillEmptySeats} class="w-4 h-4 accent-sky-500" />
+						Fill empty seats with practice partners
+					</label>
+					{#if fillEmptySeats}
+						<p class="text-xs text-sky-200/70 mb-3 max-w-xs mx-auto">
+							Practice seats just draw a tile and immediately discard it each turn — no real strategy, but you can still pong/chi/hu off their discards. Good for solo practice or when you're short a player.
+						</p>
+					{/if}
+					<button
+						onclick={start}
+						disabled={!fillEmptySeats || gameState.players.length === 0}
+						class="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-600/30 disabled:text-white/40 rounded-lg font-semibold shadow transition-colors touch-manipulation"
+					>
+						{#if fillEmptySeats}
+							Start with {4 - gameState.players.length} practice seat{4 - gameState.players.length === 1 ? '' : 's'}
+						{:else}
+							Start game
+						{/if}
+					</button>
 				{/if}
 			</div>
 		{:else}
@@ -428,6 +450,7 @@
 							<div class="flex items-center gap-1 flex-wrap">
 								{#if player.seatWind}<span class="text-xs bg-slate-600/50 px-1.5 py-0.5 rounded">{player.seatWind}</span>{/if}
 								{#if player.isDealer}<span class="text-xs bg-yellow-500/30 text-yellow-200 px-1.5 py-0.5 rounded">Dealer</span>{/if}
+								{#if player.isDummy}<span class="text-xs bg-slate-500/30 text-slate-300 px-1.5 py-0.5 rounded">🤖 Practice</span>{/if}
 								{#if player.disconnected}<span class="text-xs bg-red-500/30 text-red-300 px-1.5 py-0.5 rounded">Away</span>{/if}
 								{#if modeLabel(player.assistMode)}<span class="text-xs bg-sky-500/20 text-sky-200 px-1.5 py-0.5 rounded">{modeLabel(player.assistMode)}</span>{/if}
 							</div>
