@@ -33,30 +33,48 @@ function tallyCounts(tiles: TileLike[]): Record<string, number> {
 	return counts;
 }
 
-/**
- * Shanten number for the "ordinary" (4 sets + 1 pair) hand shape, evaluated over
- * whatever tiles are passed in (works for a 13-tile hand, a 14-tile hand, or any
- * size — extra/unhelpful tiles are simply skipped by the search). -1 = complete,
- * 0 = tenpai (one tile away), higher = further away. `meldsNeeded` is 4 minus
- * however many melds are already exposed/declared.
- */
-export function evaluateShanten(concealedTiles: TileLike[], meldsNeeded: number): number {
-	const startCounts = tallyCounts(concealedTiles);
-	let best = Infinity;
+export interface HandGroup {
+	type: 'set' | 'pair' | 'taatsu';
+	keys: string[];
+}
 
-	function finalize(slotsUsed: number, completeCount: number, hasPair: boolean) {
+export interface HandAnalysis {
+	shanten: number;
+	groups: HandGroup[];
+}
+
+/**
+ * Full shanten analysis for the "ordinary" (4 sets + 1 pair) hand shape, evaluated
+ * over whatever tiles are passed in (works for a 13-tile hand, a 14-tile hand, or
+ * any size — extra/unhelpful tiles are simply skipped by the search). -1 = complete,
+ * 0 = tenpai (one tile away), higher = further away. `meldsNeeded` is 4 minus
+ * however many melds are already exposed/declared. `groups` lists the tile-type
+ * groups (complete sets, the pair, and taatsu) that make up the best decomposition
+ * found — tiles not mentioned in any group are floating/unhelpful right now.
+ */
+export function analyzeHand(concealedTiles: TileLike[], meldsNeeded: number): HandAnalysis {
+	const startCounts = tallyCounts(concealedTiles);
+	let best: HandAnalysis = { shanten: Infinity, groups: [] };
+
+	function finalize(groups: HandGroup[], slotsUsed: number, completeCount: number, hasPair: boolean) {
 		const taatsuCount = slotsUsed - completeCount;
 		let shanten = (meldsNeeded - completeCount) * 2 - taatsuCount - (hasPair ? 1 : 0);
 		if (slotsUsed === meldsNeeded && !hasPair) shanten += 1;
-		if (shanten < best) best = shanten;
+		if (shanten < best.shanten) best = { shanten, groups };
 	}
 
-	function search(counts: Record<string, number>, slotsUsed: number, completeCount: number, hasPair: boolean) {
+	function search(
+		counts: Record<string, number>,
+		groups: HandGroup[],
+		slotsUsed: number,
+		completeCount: number,
+		hasPair: boolean
+	) {
 		const keys = Object.keys(counts)
 			.filter((k) => counts[k] > 0)
 			.sort((a, b) => keyOrder(a) - keyOrder(b));
 		if (keys.length === 0) {
-			finalize(slotsUsed, completeCount, hasPair);
+			finalize(groups, slotsUsed, completeCount, hasPair);
 			return;
 		}
 		const key = keys[0];
@@ -68,7 +86,7 @@ export function evaluateShanten(concealedTiles: TileLike[], meldsNeeded: number)
 		if (count >= 3 && slotsUsed < meldsNeeded) {
 			const next = { ...counts };
 			next[key] -= 3;
-			search(next, slotsUsed + 1, completeCount + 1, hasPair);
+			search(next, [...groups, { type: 'set', keys: [key, key, key] }], slotsUsed + 1, completeCount + 1, hasPair);
 		}
 		if (isSuited && rank <= 7 && slotsUsed < meldsNeeded) {
 			const k2 = `${suit}-${rank + 1}`;
@@ -78,13 +96,13 @@ export function evaluateShanten(concealedTiles: TileLike[], meldsNeeded: number)
 				next[key] -= 1;
 				next[k2] -= 1;
 				next[k3] -= 1;
-				search(next, slotsUsed + 1, completeCount + 1, hasPair);
+				search(next, [...groups, { type: 'set', keys: [key, k2, k3] }], slotsUsed + 1, completeCount + 1, hasPair);
 			}
 		}
 		if (count >= 2 && slotsUsed < meldsNeeded) {
 			const next = { ...counts };
 			next[key] -= 2;
-			search(next, slotsUsed + 1, completeCount, hasPair);
+			search(next, [...groups, { type: 'taatsu', keys: [key, key] }], slotsUsed + 1, completeCount, hasPair);
 		}
 		if (isSuited && rank <= 8 && slotsUsed < meldsNeeded) {
 			const k2 = `${suit}-${rank + 1}`;
@@ -92,7 +110,7 @@ export function evaluateShanten(concealedTiles: TileLike[], meldsNeeded: number)
 				const next = { ...counts };
 				next[key] -= 1;
 				next[k2] -= 1;
-				search(next, slotsUsed + 1, completeCount, hasPair);
+				search(next, [...groups, { type: 'taatsu', keys: [key, k2] }], slotsUsed + 1, completeCount, hasPair);
 			}
 		}
 		if (isSuited && rank <= 7 && slotsUsed < meldsNeeded) {
@@ -101,23 +119,48 @@ export function evaluateShanten(concealedTiles: TileLike[], meldsNeeded: number)
 				const next = { ...counts };
 				next[key] -= 1;
 				next[k3] -= 1;
-				search(next, slotsUsed + 1, completeCount, hasPair);
+				search(next, [...groups, { type: 'taatsu', keys: [key, k3] }], slotsUsed + 1, completeCount, hasPair);
 			}
 		}
 		if (count >= 2 && !hasPair) {
 			const next = { ...counts };
 			next[key] -= 2;
-			search(next, slotsUsed, completeCount, true);
+			search(next, [...groups, { type: 'pair', keys: [key, key] }], slotsUsed, completeCount, true);
 		}
 		{
 			const next = { ...counts };
 			next[key] -= 1;
-			search(next, slotsUsed, completeCount, hasPair);
+			search(next, groups, slotsUsed, completeCount, hasPair);
 		}
 	}
 
-	search(startCounts, 0, 0, false);
+	search(startCounts, [], 0, 0, false);
 	return best;
+}
+
+/** Shanten number only — see {@link analyzeHand} for the full decomposition. */
+export function evaluateShanten(concealedTiles: TileLike[], meldsNeeded: number): number {
+	return analyzeHand(concealedTiles, meldsNeeded).shanten;
+}
+
+/**
+ * Maps each group from a HandAnalysis onto specific tile ids from the hand
+ * (any matching instance will do, since same-type tiles are interchangeable),
+ * for highlighting a player's hand by role. Tiles in no group are left unmapped.
+ */
+export function assignHandGroups(hand: Tile[], groups: HandGroup[]): Map<string, 'set' | 'pair' | 'taatsu'> {
+	const used = new Set<string>();
+	const map = new Map<string, 'set' | 'pair' | 'taatsu'>();
+	for (const group of groups) {
+		for (const key of group.keys) {
+			const match = hand.find((t) => !used.has(t.id) && tileKey(t) === key);
+			if (match) {
+				used.add(match.id);
+				map.set(match.id, group.type);
+			}
+		}
+	}
+	return map;
 }
 
 function allTileTypes(): TileLike[] {

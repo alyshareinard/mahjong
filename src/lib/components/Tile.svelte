@@ -5,12 +5,14 @@
 		tile,
 		selected = false,
 		highlight = false,
+		groupType = null,
 		small = false,
 		onclick
 	}: {
 		tile: Tile;
 		selected?: boolean;
 		highlight?: boolean;
+		groupType?: 'set' | 'pair' | 'taatsu' | null;
 		small?: boolean;
 		onclick?: () => void;
 	} = $props();
@@ -24,10 +26,16 @@
 <button
 	type="button"
 	class="relative {sizeClass} bg-[#fdfaf3] rounded-md shadow-md border border-black/10 flex flex-col items-center justify-center transition-transform hover:-translate-y-1 focus:outline-none focus:ring-2 focus:ring-amber-400 touch-manipulation"
-	class:ring-2={selected}
+	class:ring-2={selected || highlight || groupType}
 	class:ring-amber-400={selected}
 	class:-translate-y-2={selected}
-	class:ring-emerald-400={highlight}
+	class:ring-yellow-400={highlight}
+	class:animate-pulse={highlight}
+	class:ring-emerald-500={!highlight && groupType === 'set'}
+	class:ring-purple-500={!highlight && groupType === 'pair'}
+	class:ring-sky-400={!highlight && groupType === 'taatsu'}
+	class:ring-dashed={!highlight && groupType === 'taatsu'}
+	title={tileName(tile)}
 	aria-label={tileName(tile)}
 	{onclick}
 >

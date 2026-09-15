@@ -3,7 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { getSocket } from '$lib/socket';
 	import { sortTiles, tileName, windLabel, type Tile as TileT, type WindRank } from '$lib/tiles';
-	import { evaluateShanten, computeUkeire, suggestDiscards, evaluateClaimOptions, shantenLabel } from '$lib/shanten';
+	import { analyzeHand, assignHandGroups, computeUkeire, suggestDiscards, evaluateClaimOptions, shantenLabel } from '$lib/shanten';
 	import TileComponent from '$lib/components/Tile.svelte';
 	import { onMount, onDestroy } from 'svelte';
 	import type { Socket } from 'socket.io-client';
@@ -117,9 +117,14 @@
 		const g = gameState;
 		return g ? 4 - g.myMelds.length : 4;
 	});
-	let myShanten = $derived.by(() => {
+	let myAnalysis = $derived.by(() => {
 		const g = gameState;
-		return g ? evaluateShanten(g.myHand, myMeldsNeeded) : 0;
+		return g ? analyzeHand(g.myHand, myMeldsNeeded) : { shanten: 0, groups: [] };
+	});
+	let myShanten = $derived(myAnalysis.shanten);
+	let myGroupMap = $derived.by(() => {
+		const g = gameState;
+		return g ? assignHandGroups(g.myHand, myAnalysis.groups) : new Map<string, 'set' | 'pair' | 'taatsu'>();
 	});
 	let myUkeire = $derived.by(() => {
 		const g = gameState;
@@ -566,9 +571,21 @@
 
 				<div class="flex flex-wrap gap-1 justify-center">
 					{#each sortedHand() as tile}
-						<TileComponent {tile} onclick={() => handleHandTileClick(tile.id)} />
+						<TileComponent
+							{tile}
+							highlight={tile.id === gameState.myLastDrawnTileId}
+							groupType={gameState.myAssistMode === 'learning' ? (myGroupMap.get(tile.id) ?? null) : null}
+							onclick={() => handleHandTileClick(tile.id)}
+						/>
 					{/each}
 				</div>
+				{#if gameState.myAssistMode === 'learning' && myAnalysis.groups.length > 0}
+					<p class="text-xs text-sky-200/70 flex flex-wrap gap-x-3 gap-y-0.5 justify-center">
+						<span><span class="inline-block w-2.5 h-2.5 rounded-full bg-emerald-500 mr-1 align-middle"></span>complete set</span>
+						<span><span class="inline-block w-2.5 h-2.5 rounded-full bg-purple-500 mr-1 align-middle"></span>your pair</span>
+						<span><span class="inline-block w-2.5 h-2.5 rounded-full border-2 border-dashed border-sky-400 mr-1 align-middle"></span>partial (taatsu)</span>
+					</p>
+				{/if}
 
 				<div class="flex flex-wrap gap-2 justify-center mt-2">
 					{#if gameState.isMyTurn && gameState.turnPhase === 'awaitingDraw'}
