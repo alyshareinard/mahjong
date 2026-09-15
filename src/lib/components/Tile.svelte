@@ -30,7 +30,6 @@
 	class:ring-amber-400={selected}
 	class:-translate-y-2={selected}
 	class:ring-yellow-400={highlight}
-	class:animate-pulse={highlight}
 	class:ring-emerald-500={!highlight && groupType === 'set'}
 	class:ring-purple-500={!highlight && groupType === 'pair'}
 	class:ring-sky-400={!highlight && groupType === 'taatsu'}

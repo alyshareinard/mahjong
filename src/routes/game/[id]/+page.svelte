@@ -304,6 +304,11 @@
 		return '';
 	}
 
+	// Learning mode includes everything Hint mode offers, plus the passive panel.
+	function showsHints(mode: AssistMode): boolean {
+		return mode === 'hint' || mode === 'learning';
+	}
+
 	function visibleCount(suit: string, rank: number | string): number {
 		const g = gameState;
 		if (!g) return 0;
@@ -495,7 +500,7 @@
 						</div>
 					{/if}
 
-					{#if gameState.myAssistMode === 'hint'}
+					{#if showsHints(gameState.myAssistMode)}
 						{#if !showClaimHint}
 							<button onclick={() => (showClaimHint = true)} class="text-xs px-3 py-1.5 bg-sky-700 hover:bg-sky-600 rounded-lg transition-colors touch-manipulation">💡 Hint</button>
 						{:else if myClaimHint}
@@ -602,7 +607,7 @@
 				</div>
 				{#if gameState.isMyTurn && gameState.turnPhase === 'awaitingDiscard'}
 					<p class="text-xs text-emerald-200/70">Tap a tile above to discard it</p>
-					{#if gameState.myAssistMode === 'hint'}
+					{#if showsHints(gameState.myAssistMode)}
 						{#if !showDiscardHint}
 							<button onclick={() => (showDiscardHint = true)} class="text-xs px-3 py-1.5 bg-sky-700 hover:bg-sky-600 rounded-lg transition-colors touch-manipulation">💡 Hint</button>
 						{:else if myDiscardSuggestions.length > 0}
