@@ -14,13 +14,17 @@
 	}
 
 	function savePlayer() {
-		localStorage.setItem(NAME_KEY, playerName || 'Player 1');
-		localStorage.setItem(ID_KEY, playerId);
+		// sessionStorage (not localStorage): each browser tab/window gets its own
+		// identity, so opening several windows lets one person sit in multiple
+		// seats for testing, while a refresh within a window still reconnects
+		// correctly since sessionStorage survives that.
+		sessionStorage.setItem(NAME_KEY, playerName || 'Player 1');
+		sessionStorage.setItem(ID_KEY, playerId);
 	}
 
 	onMount(() => {
-		playerName = localStorage.getItem(NAME_KEY) || '';
-		playerId = localStorage.getItem(ID_KEY) || generateId();
+		playerName = sessionStorage.getItem(NAME_KEY) || '';
+		playerId = sessionStorage.getItem(ID_KEY) || generateId();
 	});
 
 	function generateCode(length = 6) {
