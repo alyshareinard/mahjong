@@ -40,7 +40,15 @@ export interface HandGroup {
 
 export interface HandAnalysis {
 	shanten: number;
-	groups: HandGroup[];
+	/**
+	 * Every group (complete set, the pair, or a taatsu) that appears in ANY
+	 * decomposition tying for the best shanten found — a flat, deduplicated
+	 * pool of possibilities, not one consistent partition. When a hand is
+	 * genuinely ambiguous (e.g. holding 5,6,6 of a suit, where either 5+6 or
+	 * 6+6 works equally well), both groups show up here so the UI can present
+	 * both rather than silently picking one.
+	 */
+	groupOptions: HandGroup[];
 }
 
 /**
@@ -48,19 +56,44 @@ export interface HandAnalysis {
  * over whatever tiles are passed in (works for a 13-tile hand, a 14-tile hand, or
  * any size — extra/unhelpful tiles are simply skipped by the search). -1 = complete,
  * 0 = tenpai (one tile away), higher = further away. `meldsNeeded` is 4 minus
- * however many melds are already exposed/declared. `groups` lists the tile-type
- * groups (complete sets, the pair, and taatsu) that make up the best decomposition
- * found — tiles not mentioned in any group are floating/unhelpful right now.
+ * however many melds are already exposed/declared.
  */
+// A hand with a few identical/adjacent tiles can genuinely tie across many
+// decompositions (e.g. 5,6,7,7,7 of a suit ties several ways). Capping how
+// many distinct alternatives we keep bounds how many stacked underline rows
+// the UI ever has to show — past this it stops being "here's the ambiguity"
+// and starts being noise.
+const MAX_GROUP_OPTIONS = 10;
+
 export function analyzeHand(concealedTiles: TileLike[], meldsNeeded: number): HandAnalysis {
 	const startCounts = tallyCounts(concealedTiles);
-	let best: HandAnalysis = { shanten: Infinity, groups: [] };
+	let bestShanten = Infinity;
+	const groupOptions: HandGroup[] = [];
+	const seenGroupSignatures = new Set<string>();
+
+	function groupSignature(g: HandGroup): string {
+		return `${g.type}:${[...g.keys].sort().join(',')}`;
+	}
 
 	function finalize(groups: HandGroup[], slotsUsed: number, completeCount: number, hasPair: boolean) {
 		const taatsuCount = slotsUsed - completeCount;
 		let shanten = (meldsNeeded - completeCount) * 2 - taatsuCount - (hasPair ? 1 : 0);
 		if (slotsUsed === meldsNeeded && !hasPair) shanten += 1;
-		if (shanten < best.shanten) best = { shanten, groups };
+		if (shanten < bestShanten) {
+			bestShanten = shanten;
+			groupOptions.length = 0;
+			seenGroupSignatures.clear();
+		}
+		if (shanten === bestShanten) {
+			for (const g of groups) {
+				if (groupOptions.length >= MAX_GROUP_OPTIONS) break;
+				const sig = groupSignature(g);
+				if (!seenGroupSignatures.has(sig)) {
+					seenGroupSignatures.add(sig);
+					groupOptions.push(g);
+				}
+			}
+		}
 	}
 
 	function search(
@@ -135,7 +168,7 @@ export function analyzeHand(concealedTiles: TileLike[], meldsNeeded: number): Ha
 	}
 
 	search(startCounts, [], 0, 0, false);
-	return best;
+	return { shanten: bestShanten, groupOptions };
 }
 
 /** Shanten number only — see {@link analyzeHand} for the full decomposition. */
@@ -143,24 +176,56 @@ export function evaluateShanten(concealedTiles: TileLike[], meldsNeeded: number)
 	return analyzeHand(concealedTiles, meldsNeeded).shanten;
 }
 
+export interface TileUnderline {
+	row: number;
+	type: 'set' | 'pair' | 'taatsu';
+}
+
 /**
- * Maps each group from a HandAnalysis onto specific tile ids from the hand
- * (any matching instance will do, since same-type tiles are interchangeable),
- * for highlighting a player's hand by role. Tiles in no group are left unmapped.
+ * Resolves each candidate group onto actual positions in `hand` (the same
+ * array order the caller renders), then assigns each group a "row" such that
+ * two groups sharing a tile position never land on the same row — so a tile
+ * that's ambiguous between two roles (e.g. 6 could pair with a neighboring 5
+ * as a run, or with another 6 as a pair-toward-triplet) gets a separate,
+ * visually stacked underline for each possibility instead of the two
+ * conflicting on one line. Returns one underline list per hand position
+ * (empty for tiles not part of any candidate group).
  */
-export function assignHandGroups(hand: Tile[], groups: HandGroup[]): Map<string, 'set' | 'pair' | 'taatsu'> {
-	const used = new Set<string>();
-	const map = new Map<string, 'set' | 'pair' | 'taatsu'>();
-	for (const group of groups) {
+export function computeUnderlines(hand: Tile[], groupOptions: HandGroup[]): TileUnderline[][] {
+	const resolved: { type: HandGroup['type']; positions: number[] }[] = [];
+	for (const group of groupOptions) {
+		const used = new Set<number>();
+		const positions: number[] = [];
+		let ok = true;
 		for (const key of group.keys) {
-			const match = hand.find((t) => !used.has(t.id) && tileKey(t) === key);
-			if (match) {
-				used.add(match.id);
-				map.set(match.id, group.type);
+			const idx = hand.findIndex((t, i) => !used.has(i) && tileKey(t) === key);
+			if (idx === -1) {
+				ok = false;
+				break;
 			}
+			used.add(idx);
+			positions.push(idx);
 		}
+		if (ok) resolved.push({ type: group.type, positions });
 	}
-	return map;
+
+	resolved.sort((a, b) => Math.min(...a.positions) - Math.min(...b.positions));
+
+	const rowOccupancy: Set<number>[] = [];
+	const rows: number[] = [];
+	for (const g of resolved) {
+		let row = 0;
+		while (rowOccupancy[row] && g.positions.some((p) => rowOccupancy[row].has(p))) row++;
+		if (!rowOccupancy[row]) rowOccupancy[row] = new Set();
+		for (const p of g.positions) rowOccupancy[row].add(p);
+		rows.push(row);
+	}
+
+	const result: TileUnderline[][] = hand.map(() => []);
+	resolved.forEach((g, i) => {
+		for (const p of g.positions) result[p].push({ row: rows[i], type: g.type });
+	});
+	return result;
 }
 
 function allTileTypes(): TileLike[] {
