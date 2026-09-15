@@ -90,7 +90,7 @@
 	</div>
 
 	<p class="text-emerald-200/60 text-xs mt-8 text-center max-w-sm">
-		Mahjong needs exactly 4 players. Share your room code with three friends to start.
+		Mahjong is played with 4 players. Share your room code with three friends, or add practice seats in the table if you have fewer.
 	</p>
 
 	<a
