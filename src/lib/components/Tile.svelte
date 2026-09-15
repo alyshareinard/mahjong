@@ -14,7 +14,7 @@
 		tile: Tile;
 		selected?: boolean;
 		highlight?: boolean;
-		underlines?: { row: number; type: UnderlineType }[];
+		underlines?: { row: number; type: UnderlineType; extendRight: boolean }[];
 		small?: boolean;
 		onclick?: () => void;
 	} = $props();
@@ -30,9 +30,14 @@
 		taatsu: 'bg-sky-400'
 	};
 
+	// The parent lays tiles out with `gap-1` (4px); extending a bridged bar by
+	// that same amount makes it visually touch the next tile's bar so a
+	// multi-tile group reads as one continuous line instead of stub segments.
+	const GAP_PX = 4;
+
 	const rowCount = $derived(underlines.length > 0 ? Math.max(...underlines.map((u) => u.row)) + 1 : 0);
 	const rows = $derived(
-		Array.from({ length: rowCount }, (_, row) => underlines.find((u) => u.row === row)?.type ?? null)
+		Array.from({ length: rowCount }, (_, row) => underlines.find((u) => u.row === row) ?? null)
 	);
 </script>
 
@@ -55,8 +60,11 @@
 	</button>
 	{#if rowCount > 0}
 		<div class="flex flex-col gap-0.5 mt-0.5 w-full">
-			{#each rows as type}
-				<div class="h-[3px] rounded-full {type ? UNDERLINE_COLOR[type] : 'bg-transparent'}"></div>
+			{#each rows as entry}
+				<div
+					class="h-[3px] {entry ? UNDERLINE_COLOR[entry.type] : 'bg-transparent'}"
+					style={entry?.extendRight ? `width: calc(100% + ${GAP_PX}px);` : ''}
+				></div>
 			{/each}
 		</div>
 	{/if}

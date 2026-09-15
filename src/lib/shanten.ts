@@ -179,6 +179,10 @@ export function evaluateShanten(concealedTiles: TileLike[], meldsNeeded: number)
 export interface TileUnderline {
 	row: number;
 	type: 'set' | 'pair' | 'taatsu';
+	/** True if the next hand position is also part of this same group at this
+	 * row, so the renderer can bridge the gap between the two tiles rather
+	 * than showing two visually separate stub bars. */
+	extendRight: boolean;
 }
 
 /**
@@ -223,7 +227,12 @@ export function computeUnderlines(hand: Tile[], groupOptions: HandGroup[]): Tile
 
 	const result: TileUnderline[][] = hand.map(() => []);
 	resolved.forEach((g, i) => {
-		for (const p of g.positions) result[p].push({ row: rows[i], type: g.type });
+		const sortedPositions = [...g.positions].sort((a, b) => a - b);
+		for (let k = 0; k < sortedPositions.length; k++) {
+			const pos = sortedPositions[k];
+			const extendRight = sortedPositions[k + 1] === pos + 1;
+			result[pos].push({ row: rows[i], type: g.type, extendRight });
+		}
 	});
 	return result;
 }

@@ -137,6 +137,14 @@
 		if (!(g && g.isMyTurn && g.turnPhase === 'awaitingDiscard')) return [];
 		return suggestDiscards(g.myHand, myMeldsNeeded);
 	});
+	// Every discard that ties for the best resulting shanten — shown as one
+	// equally-good set rather than picking a single "best" and implying the
+	// others are worse when they aren't.
+	let myBestDiscards = $derived.by(() => {
+		if (myDiscardSuggestions.length === 0) return [];
+		const bestShanten = myDiscardSuggestions[0].resultingShanten;
+		return myDiscardSuggestions.filter((s) => s.resultingShanten === bestShanten);
+	});
 	let myClaimHint = $derived.by(() => {
 		const g = gameState;
 		const opts = g?.pendingClaim?.myOptions;
@@ -634,17 +642,23 @@
 					{#if showsHints(gameState.myAssistMode)}
 						{#if !showDiscardHint}
 							<button onclick={() => (showDiscardHint = true)} class="text-xs px-3 py-1.5 bg-sky-700 hover:bg-sky-600 rounded-lg transition-colors touch-manipulation">💡 Hint</button>
-						{:else if myDiscardSuggestions.length > 0}
-							{@const best = myDiscardSuggestions[0]}
+						{:else if myBestDiscards.length > 0}
+							{@const bestShanten = myBestDiscards[0].resultingShanten}
 							{@const drawn = drawnTileSuggestion()}
+							{@const drawnIsBest = drawn && myBestDiscards.some((s) => s.tile.suit === drawn.tile.suit && s.tile.rank === drawn.tile.rank)}
 							<div class="w-full max-w-md bg-sky-950/60 border border-sky-500/30 rounded-lg p-3 text-xs text-sky-100 space-y-1">
-								<p>
-									Best discard: <strong>{tileName(best.tile)}</strong> → {shantenLabel(best.resultingShanten)}
-									({best.ukeireCount} tile type{best.ukeireCount === 1 ? '' : 's'} would help after)
-								</p>
-								{#if drawn && drawn.tile.suit === best.tile.suit && drawn.tile.rank === best.tile.rank}
-									<p class="text-emerald-300">That's the tile you just drew — go ahead and discard it.</p>
-								{:else if drawn}
+								{#if myBestDiscards.length === 1}
+									<p>
+										Best discard: <strong>{tileName(myBestDiscards[0].tile)}</strong> → {shantenLabel(bestShanten)}
+										({myBestDiscards[0].ukeireCount} tile type{myBestDiscards[0].ukeireCount === 1 ? '' : 's'} would help after)
+									</p>
+								{:else}
+									<p>
+										Equally good discards (all lead to {shantenLabel(bestShanten)}):
+										<strong>{myBestDiscards.map((s) => tileName(s.tile)).join(', ')}</strong>
+									</p>
+								{/if}
+								{#if drawn && !drawnIsBest}
 									<p class="text-amber-200">
 										Keep what you drew — discarding it instead would leave you at {shantenLabel(drawn.resultingShanten)}.
 									</p>
