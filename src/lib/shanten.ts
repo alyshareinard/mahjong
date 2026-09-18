@@ -193,7 +193,26 @@ export function analyzeHand(concealedTiles: TileLike[], meldsNeeded: number): Ha
 	collect(bestShanten, true, MAX_GROUP_OPTIONS);
 	collect(bestShanten + 1, false, MAX_NEAR_MISS_GROUP_OPTIONS);
 
-	return { shanten: bestShanten, groupOptions };
+	// A near-miss taatsu/pair whose tiles are entirely inside an optimal complete
+	// set is never worth showing — it's just "here's a worse way to read the same
+	// tiles you already have a made meld from" (e.g. 7-8 and 8-9 dashed under a
+	// 7-8-9 chow that's already solid). Only filters near-miss groups; an optimal
+	// set/pair/taatsu is kept even if some other optimal set also covers its tiles.
+	function keysSubsetOf(candidate: string[], container: string[]): boolean {
+		const remaining = [...container];
+		for (const k of candidate) {
+			const idx = remaining.indexOf(k);
+			if (idx === -1) return false;
+			remaining.splice(idx, 1);
+		}
+		return true;
+	}
+	const optimalSetKeyLists = groupOptions.filter((g) => g.optimal && g.type === 'set').map((g) => g.keys);
+	const filtered = groupOptions.filter(
+		(g) => g.optimal || g.type === 'set' || !optimalSetKeyLists.some((setKeys) => keysSubsetOf(g.keys, setKeys))
+	);
+
+	return { shanten: bestShanten, groupOptions: filtered };
 }
 
 /** Shanten number only — see {@link analyzeHand} for the full decomposition. */

@@ -1925,6 +1925,31 @@ function applySpecialFishingScore(player, ordinaryResult, handMode) {
 	return ordinaryResult;
 }
 
+const MAX_NAMED_HAND_FISHING_RESULTS = 8;
+
+// For the Learning-mode hint: every named hand this player is exactly one tile away
+// from right now, with which specific tile(s) would complete it. Cheap (checks each
+// hand against each of the 34 tile kinds — no partial-progress search), so it only
+// ever answers "how close is 1 tile", not "how close is 2 or 3 tiles".
+function namedHandFishingOptions(player, handMode) {
+	if (handMode === 'beginner') return [];
+	const tally = specialHandTally(player, null);
+	const ctx = { seatWind: player.seatWind, player };
+	const results = [];
+	for (const hand of handsListFor(handMode)) {
+		const waits = [];
+		for (const probe of ALL_TILE_KINDS) {
+			const trial = cloneCounts(tally);
+			const key = `${probe.suit}-${probe.rank}`;
+			trial[key] = (trial[key] || 0) + 1;
+			if (hand.matches(trial, ctx)) waits.push({ suit: probe.suit, rank: probe.rank });
+		}
+		if (waits.length > 0) results.push({ name: hand.name, winning: hand.winning, fishing: hand.fishing, waits });
+	}
+	results.sort((a, b) => b.winning - a.winning);
+	return results.slice(0, MAX_NAMED_HAND_FISHING_RESULTS);
+}
+
 function findTileInHand(hand, suit, rank) {
 	return hand.find((t) => t.suit === suit && t.rank === rank);
 }
@@ -2093,6 +2118,8 @@ function getStateForPlayer(game, playerId) {
 		canDeclareSelfDrawWin: canWin,
 		myOriginalCallEligible: player.originalCallEligible,
 		myOriginalCallActive: player.originalCallActive,
+		myNamedHandFishing:
+			game.status === 'playing' && player.assistMode === 'learning' ? namedHandFishingOptions(player, game.handMode) : [],
 		availableConcealedKongs:
 			isMyTurn && game.turnPhase === 'awaitingDiscard' ? getConcealedKongOptions(player) : [],
 		availablePromotedKongs:
@@ -2400,6 +2427,13 @@ function handleDraw(game, socket) {
 // hand if that leaves them calling (one tile from complete). If they never change
 // their hand again — always discarding exactly the tile they just drew, and never
 // claiming/konging — before going Mah-Jong, it's worth an extra double.
+// Called whenever a discard gets claimed (pong/kong/chi/win) so it stops showing in the
+// discard pile at the same time it appears in the claimer's exposed meld or winning hand.
+function removeDiscardTile(game, tileId) {
+	const idx = game.discards.findIndex((d) => d.tile.id === tileId);
+	if (idx !== -1) game.discards.splice(idx, 1);
+}
+
 function performDiscard(game, player, tileId) {
 	const idx = player.hand.findIndex((t) => t.id === tileId);
 	if (idx === -1) return;
@@ -2553,6 +2587,7 @@ function executePongKongClaim(game, pc, winnerId) {
 		concealed: false,
 		claimedFrom: pc.discarderId
 	});
+	removeDiscardTile(game, discard.id);
 	log(game, `${player.name} claimed ${response.type === 'kong' ? 'kong' : 'pong'} on ${describeTile(discard)}`);
 	if (player.originalCallActive) {
 		player.originalCallActive = false;
@@ -2586,6 +2621,7 @@ function executeChiClaim(game, pc, playerId) {
 	}
 	const meldTiles = [...usedTiles, discard].sort((a, b) => a.rank - b.rank);
 	player.melds.push({ type: 'chow', tiles: meldTiles, concealed: false, claimedFrom: pc.discarderId });
+	removeDiscardTile(game, discard.id);
 	log(game, `${player.name} chi'd ${describeTile(discard)}`);
 	if (player.originalCallActive) {
 		player.originalCallActive = false;
@@ -2685,6 +2721,7 @@ function endHandWithDiscardWin(game, pc, winnerId) {
 		// this shouldn't happen. If it somehow does, treat it as if everyone passed.
 		return advanceTurnAfterPass(game, pc.discarderIdx);
 	}
+	removeDiscardTile(game, discard.id);
 	endHand(game, { winnerId, winnerResult: result, selfDraw: false, discarderId: discarder.id, winningTile: discard });
 }
 
