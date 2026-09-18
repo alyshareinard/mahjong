@@ -329,5 +329,5 @@ export function evaluateClaimOptions(
 export function shantenLabel(shanten: number): string {
 	if (shanten <= -1) return 'Complete';
 	if (shanten === 0) return 'Tenpai (1 tile away)';
-	return `${shanten} tiles away`;
+	return `${shanten + 1} tiles away`;
 }
