@@ -675,9 +675,8 @@
 					<p class="text-xs text-sky-200/70 flex flex-wrap gap-x-3 gap-y-0.5 justify-center">
 						<span><span class="inline-block w-3 h-[3px] rounded-full bg-emerald-500 mr-1 align-middle"></span>complete set</span>
 						<span><span class="inline-block w-3 h-[3px] rounded-full bg-purple-500 mr-1 align-middle"></span>your pair</span>
-						<span><span class="inline-block w-3 h-[3px] rounded-full bg-sky-400 mr-1 align-middle"></span>partial (taatsu)</span>
+						<span><span class="inline-block w-3 h-[3px] border-t-2 border-dashed border-sky-400 mr-1 align-middle"></span>partial (taatsu)</span>
 						<span class="text-sky-300/50">— stacked bars mean more than one way to use those tiles</span>
-						<span class="text-sky-300/50">— dashed means one tile further from tenpai than the best option shown</span>
 					</p>
 				{/if}
 

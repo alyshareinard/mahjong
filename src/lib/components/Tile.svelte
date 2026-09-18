@@ -14,7 +14,7 @@
 		tile: Tile;
 		selected?: boolean;
 		highlight?: boolean;
-		underlines?: { row: number; type: UnderlineType; optimal: boolean; extendRight: boolean }[];
+		underlines?: { row: number; type: UnderlineType; extendRight: boolean }[];
 		small?: boolean;
 		onclick?: () => void;
 	} = $props();
@@ -29,9 +29,9 @@
 		pair: 'bg-purple-500',
 		taatsu: 'bg-sky-400'
 	};
-	// Non-optimal (near-miss) groups render as a dashed line of the same color
-	// instead of a solid fill, so a completed set that isn't part of the
-	// shortest path still shows up, just visibly marked as "not the best".
+	// Taatsu (a partial — still needs one more tile) renders as a dashed line
+	// instead of a solid fill, so it reads as "not done yet" at a glance,
+	// distinct from a complete set or pair.
 	const UNDERLINE_BORDER_COLOR: Record<UnderlineType, string> = {
 		set: 'border-emerald-500',
 		pair: 'border-purple-500',
@@ -69,7 +69,7 @@
 	{#if rowCount > 0}
 		<div class="flex flex-col gap-0.5 mt-0.5 w-full">
 			{#each rows as entry}
-				{#if entry && !entry.optimal}
+				{#if entry && entry.type === 'taatsu'}
 					<div
 						class="h-[3px] border-t-2 border-dashed {UNDERLINE_BORDER_COLOR[entry.type]}"
 						style={entry.extendRight ? `width: calc(100% + ${GAP_PX}px);` : ''}
