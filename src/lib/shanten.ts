@@ -36,17 +36,26 @@ function tallyCounts(tiles: TileLike[]): Record<string, number> {
 export interface HandGroup {
 	type: 'set' | 'pair' | 'taatsu';
 	keys: string[];
+	/**
+	 * False for a group that only shows up one tile further from tenpai than
+	 * the best decomposition found — e.g. keeping a completed pung intact when
+	 * breaking it for an immediate pair is actually one tile closer. Still
+	 * worth surfacing (a human eye reasonably expects a made set to show up),
+	 * just not as the primary suggestion — the UI renders these dashed.
+	 */
+	optimal: boolean;
 }
 
 export interface HandAnalysis {
 	shanten: number;
 	/**
 	 * Every group (complete set, the pair, or a taatsu) that appears in ANY
-	 * decomposition tying for the best shanten found — a flat, deduplicated
-	 * pool of possibilities, not one consistent partition. When a hand is
-	 * genuinely ambiguous (e.g. holding 5,6,6 of a suit, where either 5+6 or
-	 * 6+6 works equally well), both groups show up here so the UI can present
-	 * both rather than silently picking one.
+	 * decomposition tying for the best shanten found, plus near-miss groups
+	 * one tile further away (`optimal: false`) — a flat, deduplicated pool of
+	 * possibilities, not one consistent partition. When a hand is genuinely
+	 * ambiguous (e.g. holding 5,6,6 of a suit, where either 5+6 or 6+6 works
+	 * equally well), both groups show up here so the UI can present both
+	 * rather than silently picking one.
 	 */
 	groupOptions: HandGroup[];
 }
@@ -60,45 +69,35 @@ export interface HandAnalysis {
  */
 // A hand with a few identical/adjacent tiles can genuinely tie across many
 // decompositions (e.g. 5,6,7,7,7 of a suit ties several ways). Capping how
-// many distinct alternatives we keep bounds how many stacked underline rows
-// the UI ever has to show — past this it stops being "here's the ambiguity"
-// and starts being noise.
+// many distinct alternatives we keep (separately for the optimal and the
+// one-tile-worse near-miss tiers) bounds how many stacked underline rows the
+// UI ever has to show — past this it stops being "here's the ambiguity" and
+// starts being noise.
 const MAX_GROUP_OPTIONS = 10;
+const MAX_NEAR_MISS_GROUP_OPTIONS = 10;
 
 export function analyzeHand(concealedTiles: TileLike[], meldsNeeded: number): HandAnalysis {
 	const startCounts = tallyCounts(concealedTiles);
-	let bestShanten = Infinity;
-	const groupOptions: HandGroup[] = [];
-	const seenGroupSignatures = new Set<string>();
+	const totalTiles = concealedTiles.length;
+	const found: { shanten: number; groups: Omit<HandGroup, 'optimal'>[] }[] = [];
 
-	function groupSignature(g: HandGroup): string {
-		return `${g.type}:${[...g.keys].sort().join(',')}`;
-	}
-
-	function finalize(groups: HandGroup[], slotsUsed: number, completeCount: number, hasPair: boolean) {
+	function finalize(groups: Omit<HandGroup, 'optimal'>[], slotsUsed: number, completeCount: number, hasPair: boolean) {
 		const taatsuCount = slotsUsed - completeCount;
 		let shanten = (meldsNeeded - completeCount) * 2 - taatsuCount - (hasPair ? 1 : 0);
-		if (slotsUsed === meldsNeeded && !hasPair) shanten += 1;
-		if (shanten < bestShanten) {
-			bestShanten = shanten;
-			groupOptions.length = 0;
-			seenGroupSignatures.clear();
-		}
-		if (shanten === bestShanten) {
-			for (const g of groups) {
-				if (groupOptions.length >= MAX_GROUP_OPTIONS) break;
-				const sig = groupSignature(g);
-				if (!seenGroupSignatures.has(sig)) {
-					seenGroupSignatures.add(sig);
-					groupOptions.push(g);
-				}
-			}
-		}
+		// The classic "no pair yet" penalty only makes sense when every tile has
+		// genuinely been committed to a meld or taatsu — if there's a tile left
+		// over (e.g. 4 complete melds + one unpaired single, a tanki wait), that
+		// spare tile IS the pair candidate, and applying the penalty anyway is
+		// what made an obvious tenpai/near-tenpai hand read as needing an extra,
+		// unnecessary exchange (and flooded ukeire with irrelevant tiles).
+		const leftover = totalTiles - (completeCount * 3 + taatsuCount * 2 + (hasPair ? 2 : 0));
+		if (slotsUsed === meldsNeeded && !hasPair && leftover <= 0) shanten += 1;
+		found.push({ shanten, groups });
 	}
 
 	function search(
 		counts: Record<string, number>,
-		groups: HandGroup[],
+		groups: Omit<HandGroup, 'optimal'>[],
 		slotsUsed: number,
 		completeCount: number,
 		hasPair: boolean
@@ -168,6 +167,32 @@ export function analyzeHand(concealedTiles: TileLike[], meldsNeeded: number): Ha
 	}
 
 	search(startCounts, [], 0, 0, false);
+
+	const bestShanten = Math.min(...found.map((f) => f.shanten));
+	const groupOptions: HandGroup[] = [];
+	// Keyed without the optimal flag: a group already shown at its best tier
+	// shouldn't also show up dashed as a near-miss duplicate of itself.
+	const seenGroupSignatures = new Set<string>();
+	function groupSignature(g: Omit<HandGroup, 'optimal'>): string {
+		return `${g.type}:${[...g.keys].sort().join(',')}`;
+	}
+	function collect(targetShanten: number, optimal: boolean, cap: number) {
+		let count = 0;
+		for (const f of found) {
+			if (f.shanten !== targetShanten) continue;
+			for (const g of f.groups) {
+				if (count >= cap) return;
+				const sig = groupSignature(g);
+				if (seenGroupSignatures.has(sig)) continue;
+				seenGroupSignatures.add(sig);
+				groupOptions.push({ ...g, optimal });
+				count++;
+			}
+		}
+	}
+	collect(bestShanten, true, MAX_GROUP_OPTIONS);
+	collect(bestShanten + 1, false, MAX_NEAR_MISS_GROUP_OPTIONS);
+
 	return { shanten: bestShanten, groupOptions };
 }
 
@@ -179,6 +204,8 @@ export function evaluateShanten(concealedTiles: TileLike[], meldsNeeded: number)
 export interface TileUnderline {
 	row: number;
 	type: 'set' | 'pair' | 'taatsu';
+	/** False renders as a dashed line — see {@link HandGroup.optimal}. */
+	optimal: boolean;
 	/** True if the next hand position is also part of this same group at this
 	 * row, so the renderer can bridge the gap between the two tiles rather
 	 * than showing two visually separate stub bars. */
@@ -192,11 +219,13 @@ export interface TileUnderline {
  * that's ambiguous between two roles (e.g. 6 could pair with a neighboring 5
  * as a run, or with another 6 as a pair-toward-triplet) gets a separate,
  * visually stacked underline for each possibility instead of the two
- * conflicting on one line. Returns one underline list per hand position
- * (empty for tiles not part of any candidate group).
+ * conflicting on one line. Optimal groups claim rows first, so a tile's
+ * best-decomposition role always lands on row 0 when it has one. Returns one
+ * underline list per hand position (empty for tiles not part of any
+ * candidate group).
  */
 export function computeUnderlines(hand: Tile[], groupOptions: HandGroup[]): TileUnderline[][] {
-	const resolved: { type: HandGroup['type']; positions: number[] }[] = [];
+	const resolved: { type: HandGroup['type']; optimal: boolean; positions: number[] }[] = [];
 	for (const group of groupOptions) {
 		const used = new Set<number>();
 		const positions: number[] = [];
@@ -210,10 +239,10 @@ export function computeUnderlines(hand: Tile[], groupOptions: HandGroup[]): Tile
 			used.add(idx);
 			positions.push(idx);
 		}
-		if (ok) resolved.push({ type: group.type, positions });
+		if (ok) resolved.push({ type: group.type, optimal: group.optimal, positions });
 	}
 
-	resolved.sort((a, b) => Math.min(...a.positions) - Math.min(...b.positions));
+	resolved.sort((a, b) => Number(b.optimal) - Number(a.optimal) || Math.min(...a.positions) - Math.min(...b.positions));
 
 	const rowOccupancy: Set<number>[] = [];
 	const rows: number[] = [];
@@ -231,7 +260,7 @@ export function computeUnderlines(hand: Tile[], groupOptions: HandGroup[]): Tile
 		for (let k = 0; k < sortedPositions.length; k++) {
 			const pos = sortedPositions[k];
 			const extendRight = sortedPositions[k + 1] === pos + 1;
-			result[pos].push({ row: rows[i], type: g.type, extendRight });
+			result[pos].push({ row: rows[i], type: g.type, optimal: g.optimal, extendRight });
 		}
 	});
 	return result;
