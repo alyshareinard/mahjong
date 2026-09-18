@@ -87,7 +87,13 @@
 		canDeclareSelfDrawWin: boolean;
 		myOriginalCallEligible: boolean;
 		myOriginalCallActive: boolean;
-		myNamedHandFishing: { name: string; winning: number; fishing: number; waits: { suit: string; rank: number | string }[] }[];
+		myNamedHandFishing: {
+			name: string;
+			winning: number;
+			fishing: number;
+			distance: number;
+			waits: { suit: string; rank: number | string }[];
+		}[];
 		availableConcealedKongs: { suit: string; rank: number | string }[];
 		availablePromotedKongs: { meldIndex: number; suit: string; rank: number | string }[];
 		pendingClaim: PendingClaim | null;
@@ -617,28 +623,33 @@
 							<p class="mt-1 text-emerald-300">Your hand is already complete!</p>
 						{/if}
 						{#if gameState.myNamedHandFishing.length > 0}
-							<p class="mt-2 text-sky-200/80">Named hands you're one tile from completing:</p>
+							<p class="mt-2 text-sky-200/80">Named hands within reach:</p>
 							<div class="mt-1 space-y-1.5">
 								{#each gameState.myNamedHandFishing as nh}
 									<div class="bg-black/30 rounded px-1.5 py-1">
 										<p>
 											<span class="font-semibold text-amber-200">{nh.name}</span>
-											<span class="text-sky-300/70"> — {nh.winning} pts if you finish it, {nh.fishing} if the hand ends first</span>
+											<span class="text-sky-300/70">
+												— {nh.distance === 0 ? 'complete' : `${nh.distance} tile${nh.distance === 1 ? '' : 's'} away`}, {nh.winning} pts if you finish
+												it, {nh.fishing} if the hand ends first
+											</span>
 										</p>
-										<div class="flex flex-wrap gap-1 mt-0.5">
-											{#each nh.waits as w}
-												<span class="inline-block bg-black/30 rounded px-1.5 py-0.5">
-													{tileName({ suit: w.suit, rank: w.rank } as TileT)} ({remainingCount(w.suit, w.rank)} left)
-												</span>
-											{/each}
-										</div>
+										{#if nh.waits.length > 0}
+											<div class="flex flex-wrap gap-1 mt-0.5">
+												{#each nh.waits as w}
+													<span class="inline-block bg-black/30 rounded px-1.5 py-0.5">
+														{tileName({ suit: w.suit, rank: w.rank } as TileT)} ({remainingCount(w.suit, w.rank)} left)
+													</span>
+												{/each}
+											</div>
+										{/if}
 									</div>
 								{/each}
 							</div>
 						{:else if gameState.handMode === 'beginner'}
 							<p class="mt-2 text-sky-300/60">This table is playing Beginner rules — no named hands to chase.</p>
 						{:else}
-							<p class="mt-2 text-sky-300/60">No named hands are one tile away right now.</p>
+							<p class="mt-2 text-sky-300/60">No named hands are within reach right now.</p>
 						{/if}
 					</div>
 				{/if}

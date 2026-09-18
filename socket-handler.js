@@ -388,168 +388,299 @@ function bestOrdinaryWinScore(game, player, extraTile, scoreContext) {
 // ---------- named special hands (The Mah Jong Player's Companion "Short List", pp.6-7) ----------
 // These ~25 hands have their own flat Winning/Fishing scores that bypass the normal
 // basic-score-times-doubles calculation (and can exceed the normal LIMIT). Each hand's
-// `matches(counts, ctx)` gets a tally of the player's full 14-tile-equivalent hand
-// (concealed tiles + meld tiles, with kongs capped at 3 tiles so they behave like pungs)
-// and must fully account for every tile with nothing left over. A player's final score is
-// the higher of the ordinary calculation and the best matching named hand (Winning for a
-// complete hand, Fishing for a non-winner who is exactly one tile away from one at hand-end).
+// `distance(counts, ctx, maxDistance)` gets a tally of the player's full 14-tile-equivalent
+// hand (concealed tiles + meld tiles, with kongs capped at 3 tiles so they behave like pungs)
+// and reports how many tiles away it is from that exact pattern (0 = already there). A
+// player's final score is the higher of the ordinary calculation and the best matching named
+// hand (Winning for a complete hand, Fishing for a non-winner who is exactly one tile away at
+// hand-end). The Learning-mode hint also uses this to list hands a few tiles away.
 // Big Robert (marked below) is still a best-effort reading pending a closer look at the
 // book's page 14 — everything else has been confirmed against the full page text.
 
 const RED_BAMBOO_RANKS = [1, 5, 7, 9];
 const GREEN_BAMBOO_RANKS = [2, 3, 4, 6, 8];
 
-function take(counts, key, n) {
-	if ((counts[key] || 0) < n) return false;
-	counts[key] -= n;
-	return true;
+// ---------- soft ("distance") primitives ----------
+// Instead of failing when a tile isn't available, each of these takes whatever it can
+// (never more than asked) and reports the shortfall — how many more of that tile are still
+// needed. Chaining these and summing shortfalls gives "how many tiles away" a hand is from a
+// target shape. Extra/unrelated tiles a hand holds cost nothing (they just get discarded
+// along the way), which is why none of these need a "nothing left over" check the old
+// boolean matchers used.
+//
+// A few helpers pick the *cheapest* available option (e.g. "the best pair anywhere"). That's
+// only safe to use for the last, terminal piece of a pattern — one with nothing computed
+// afterward that shares its tile pool. Where two requirements draw from the same pool (e.g. a
+// pung and a pair both from the same suit), the code below enumerates the earlier choice
+// explicitly and only applies a "cheapest remaining" helper to whichever piece is genuinely
+// computed last, so a greedy pick for one can't accidentally starve the other.
+
+function takeSoft(counts, key, n) {
+	const have = counts[key] || 0;
+	const used = Math.min(have, n);
+	counts[key] = have - used;
+	return n - used;
 }
 
-function remainingTotal(counts) {
-	return Object.values(counts).reduce((a, b) => a + b, 0);
+function takeRunRangeSoft(counts, suit, lo, hi) {
+	let deficit = 0;
+	for (let r = lo; r <= hi; r++) deficit += takeSoft(counts, `${suit}-${r}`, 1);
+	return deficit;
 }
 
-function takeRunRange(counts, suit, lo, hi) {
-	for (let r = lo; r <= hi; r++) if (!take(counts, `${suit}-${r}`, 1)) return false;
-	return true;
+function takeEachWindSoft(counts) {
+	let deficit = 0;
+	for (const w of WIND_RANKS) deficit += takeSoft(counts, `wind-${w}`, 1);
+	return deficit;
 }
 
-function takeEachWind(counts) {
-	for (const w of WIND_RANKS) if (!take(counts, `wind-${w}`, 1)) return false;
-	return true;
+function takeEachDragonSoft(counts) {
+	let deficit = 0;
+	for (const d of DRAGON_RANKS) deficit += takeSoft(counts, `dragon-${d}`, 1);
+	return deficit;
 }
 
-function takeEachDragon(counts) {
-	for (const d of DRAGON_RANKS) if (!take(counts, `dragon-${d}`, 1)) return false;
-	return true;
-}
-
-// Consumes exactly one of each key in `keys`, except one (tried across every option) which
-// is consumed twice — the "any tile paired" construction used throughout the short list.
-function takeUniqueSetWithOnePaired(counts, keys) {
+// Lowest-shortfall way to take one of each key in `keys`, except one (tried across every
+// option) taken twice — the "any tile paired" construction used throughout the short list.
+function takeUniqueSetWithOnePairedSoft(counts, keys) {
+	let best = null;
 	for (const doubled of keys) {
 		const trial = cloneCounts(counts);
-		let ok = true;
-		for (const k of keys) {
-			if (!take(trial, k, k === doubled ? 2 : 1)) {
-				ok = false;
-				break;
-			}
-		}
-		if (ok) {
-			Object.assign(counts, trial);
-			return true;
+		let deficit = 0;
+		for (const k of keys) deficit += takeSoft(trial, k, k === doubled ? 2 : 1);
+		if (!best || deficit < best.deficit) best = { deficit, trial };
+	}
+	Object.assign(counts, best.trial);
+	return best.deficit;
+}
+
+// Lowest-shortfall way to reach exactly `pairCount` pairs using only tiles from `keys` (a
+// suit's 9 ranks, a fixed bamboo-color list, terminal tiles, whichever pool applies). Prefers
+// completing an existing single before starting a pair from nothing, and lets one rank
+// contribute more than one pair (e.g. all 4 copies of a tile = 2 pairs) when needed.
+function takePairsFromPoolSoft(counts, keys, pairCount) {
+	const info = keys.map((key) => ({ key, available: counts[key] || 0, used: 0 }));
+	let pairsNeeded = pairCount;
+	for (const rk of info) {
+		while (pairsNeeded > 0 && rk.available - rk.used >= 2) {
+			rk.used += 2;
+			pairsNeeded--;
 		}
 	}
-	return false;
-}
-
-// True if every remaining tile belongs to `suit` and decomposes into exactly `pairCount` pairs.
-function isExactPairsInSuit(counts, suit, pairCount) {
-	let total = 0;
-	for (const [k, v] of Object.entries(counts)) {
-		if (v <= 0) continue;
-		if (!k.startsWith(`${suit}-`)) return false;
-		if (v % 2 !== 0) return false;
-		total += v;
+	let deficit = 0;
+	for (const rk of info) {
+		if (pairsNeeded > 0 && rk.available - rk.used === 1) {
+			rk.used += 1;
+			pairsNeeded--;
+			deficit += 1;
+		}
 	}
-	return total === pairCount * 2;
+	deficit += pairsNeeded * 2;
+	for (const rk of info) counts[rk.key] = rk.available - rk.used;
+	return deficit;
 }
 
-function takeChow(counts, suit, startRank) {
-	return take(counts, `${suit}-${startRank}`, 1) && take(counts, `${suit}-${startRank + 1}`, 1) && take(counts, `${suit}-${startRank + 2}`, 1);
+function isExactPairsInSuitSoft(counts, suit, pairCount) {
+	const keys = Array.from({ length: 9 }, (_, i) => `${suit}-${i + 1}`);
+	return takePairsFromPoolSoft(counts, keys, pairCount);
 }
 
-// takeChow is a chained take() of 3 tiles: on a partial match (e.g. rank present, rank+1
-// present, rank+2 missing) it still consumes the first two before failing. Retrying different
-// start ranks against the *same* mutable object is therefore unsafe — this tries each start on
-// a fresh clone and only commits (mutating `counts`, like `take`) on an actual full match.
-function takeAnyChow(counts, suit, loRank = 1, hiRank = 7) {
+function takeChowSoft(counts, suit, startRank) {
+	return (
+		takeSoft(counts, `${suit}-${startRank}`, 1) +
+		takeSoft(counts, `${suit}-${startRank + 1}`, 1) +
+		takeSoft(counts, `${suit}-${startRank + 2}`, 1)
+	);
+}
+
+// Lowest-shortfall chow starting anywhere in [loRank, hiRank] within `suit` — safe to use
+// wherever nothing else afterward needs tiles from this same suit/rank range.
+function takeBestChowSoft(counts, suit, loRank = 1, hiRank = 7) {
+	let best = null;
 	for (let r = loRank; r <= hiRank; r++) {
 		const trial = cloneCounts(counts);
-		if (takeChow(trial, suit, r)) {
-			Object.assign(counts, trial);
-			return true;
-		}
+		const deficit = takeChowSoft(trial, suit, r);
+		if (!best || deficit < best.deficit) best = { deficit, trial };
 	}
-	return false;
+	Object.assign(counts, best.trial);
+	return best.deficit;
 }
 
-function matchWrigglySnake(counts) {
+// Lowest-shortfall chow starting anywhere in any of `suits` — for "a chow in any suit" when
+// it's the last, terminal piece of a pattern.
+function takeBestChowAcrossSuitsSoft(counts, suits) {
+	let best = null;
+	for (const suit of suits) {
+		for (let r = 1; r <= 7; r++) {
+			const trial = cloneCounts(counts);
+			const deficit = takeChowSoft(trial, suit, r);
+			if (!best || deficit < best.deficit) best = { deficit, trial };
+		}
+	}
+	Object.assign(counts, best.trial);
+	return best.deficit;
+}
+
+// Lowest-shortfall pair from any of `keys` — for "a pair" when it's the last, terminal piece.
+function takeBestPairInPoolSoft(counts, keys) {
+	let bestKey = null;
+	let bestDeficit = 2;
+	for (const k of keys) {
+		const d = Math.max(0, 2 - (counts[k] || 0));
+		if (d < bestDeficit) {
+			bestDeficit = d;
+			bestKey = k;
+		}
+	}
+	if (bestKey) takeSoft(counts, bestKey, 2);
+	return bestDeficit;
+}
+
+// Lowest-shortfall pair from any rank in any of `suits` (any-suit "Pr").
+function takeBestPairInSuitsSoft(counts, suits) {
+	return takeBestPairInPoolSoft(counts, suits.flatMap((s) => Array.from({ length: 9 }, (_, i) => `${s}-${i + 1}`)));
+}
+
+// Lowest-shortfall pung/kong (3-of-a-kind) from any of `keys`.
+function takeBestPungInPoolSoft(counts, keys) {
+	let bestKey = null;
+	let bestDeficit = 3;
+	for (const k of keys) {
+		const d = Math.max(0, 3 - (counts[k] || 0));
+		if (d < bestDeficit) {
+			bestDeficit = d;
+			bestKey = k;
+		}
+	}
+	if (bestKey) takeSoft(counts, bestKey, 3);
+	return bestDeficit;
+}
+
+// Lowest-shortfall pung restricted to a rank range within one suit (e.g. non-terminal 2-8).
+function takeBestPungInSuitRangeSoft(counts, suit, lo, hi) {
+	return takeBestPungInPoolSoft(
+		counts,
+		Array.from({ length: hi - lo + 1 }, (_, i) => `${suit}-${lo + i}`)
+	);
+}
+
+// Lowest total shortfall for `count` pungs, each a DISTINCT key from `keys` — every pung uses
+// its own key so there's no overlap to reason about, making "the N cheapest keys" optimal.
+function takeBestDistinctPungsInPoolSoft(counts, keys, count) {
+	const options = keys.map((key) => ({ key, deficit: Math.max(0, 3 - (counts[key] || 0)) }));
+	options.sort((a, b) => a.deficit - b.deficit);
+	let total = 0;
+	for (let i = 0; i < count; i++) {
+		total += options[i].deficit;
+		takeSoft(counts, options[i].key, 3);
+	}
+	return total;
+}
+
+// Lowest-shortfall run of four consecutive ranks (1-4 .. 6-9) within `suit`.
+function takeBestFourRunSoft(counts, suit) {
+	let best = null;
+	for (let r = 1; r <= 6; r++) {
+		const trial = cloneCounts(counts);
+		const d =
+			takeSoft(trial, `${suit}-${r}`, 1) +
+			takeSoft(trial, `${suit}-${r + 1}`, 1) +
+			takeSoft(trial, `${suit}-${r + 2}`, 1) +
+			takeSoft(trial, `${suit}-${r + 3}`, 1);
+		if (!best || d < best.deficit) best = { deficit: d, trial };
+	}
+	Object.assign(counts, best.trial);
+	return best.deficit;
+}
+
+function distanceWrigglySnake(counts) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		const trial = cloneCounts(counts);
 		const keys = [...Array.from({ length: 9 }, (_, i) => `${suit}-${i + 1}`), ...WIND_RANKS.map((w) => `wind-${w}`)];
-		if (takeUniqueSetWithOnePaired(trial, keys) && remainingTotal(trial) === 0) return true;
+		const d = takeUniqueSetWithOnePairedSoft(trial, keys);
+		if (d < best) best = d;
 	}
-	return false;
+	return best;
 }
 
-function matchRunPungPair(counts) {
+function distanceRunPungPair(counts) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
-		const trial = cloneCounts(counts);
-		if (!takeRunRange(trial, suit, 1, 9)) continue;
+		const base = cloneCounts(counts);
+		const runDeficit = takeRunRangeSoft(base, suit, 1, 9);
 		for (let pungRank = 1; pungRank <= 9; pungRank++) {
-			const t2 = cloneCounts(trial);
-			if (!take(t2, `${suit}-${pungRank}`, 3)) continue;
+			const t2 = cloneCounts(base);
+			const dPung = takeSoft(t2, `${suit}-${pungRank}`, 3);
 			for (let pairRank = 1; pairRank <= 9; pairRank++) {
 				const t3 = cloneCounts(t2);
-				if (take(t3, `${suit}-${pairRank}`, 2) && remainingTotal(t3) === 0) return true;
+				const total = runDeficit + dPung + takeSoft(t3, `${suit}-${pairRank}`, 2);
+				if (total < best) best = total;
 			}
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchGretasGarden(counts) {
+function distanceGretasGarden(counts) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		const trial = cloneCounts(counts);
-		if (takeRunRange(trial, suit, 1, 7) && takeEachWind(trial) && takeEachDragon(trial) && remainingTotal(trial) === 0) return true;
+		const d = takeRunRangeSoft(trial, suit, 1, 7) + takeEachWindSoft(trial) + takeEachDragonSoft(trial);
+		if (d < best) best = d;
 	}
-	return false;
+	return best;
 }
 
-function matchGretasDragon(counts) {
+function distanceGretasDragon(counts) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		for (const d of DRAGON_RANKS) {
 			const trial = cloneCounts(counts);
-			if (takeRunRange(trial, suit, 1, 7) && takeEachWind(trial) && take(trial, `dragon-${d}`, 3) && remainingTotal(trial) === 0) return true;
+			const dist = takeRunRangeSoft(trial, suit, 1, 7) + takeEachWindSoft(trial) + takeSoft(trial, `dragon-${d}`, 3);
+			if (dist < best) best = dist;
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchGertiesGarter(counts) {
+function distanceGertiesGarter(counts) {
+	let best = Infinity;
 	for (const suitA of SUITS_NUM) {
 		for (const suitB of SUITS_NUM) {
 			if (suitA === suitB) continue;
 			const trial = cloneCounts(counts);
-			if (takeRunRange(trial, suitA, 1, 7) && takeRunRange(trial, suitB, 1, 7) && remainingTotal(trial) === 0) return true;
+			const d = takeRunRangeSoft(trial, suitA, 1, 7) + takeRunRangeSoft(trial, suitB, 1, 7);
+			if (d < best) best = d;
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchRedLantern(counts, ctx) {
+function distanceRedLantern(counts, ctx) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		const trial = cloneCounts(counts);
 		const keys = Array.from({ length: 7 }, (_, i) => `${suit}-${i + 1}`);
-		if (!takeUniqueSetWithOnePaired(trial, keys)) continue;
-		if (take(trial, `wind-${ctx.seatWind}`, 3) && take(trial, 'dragon-red', 3) && remainingTotal(trial) === 0) return true;
+		const d = takeUniqueSetWithOnePairedSoft(trial, keys) + takeSoft(trial, `wind-${ctx.seatWind}`, 3) + takeSoft(trial, 'dragon-red', 3);
+		if (d < best) best = d;
 	}
-	return false;
+	return best;
 }
 
-function matchGatesOfHeaven(counts) {
+function distanceGatesOfHeaven(counts) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		const trial = cloneCounts(counts);
 		const keys = Array.from({ length: 7 }, (_, i) => `${suit}-${i + 2}`);
-		if (!takeUniqueSetWithOnePaired(trial, keys)) continue;
-		if (take(trial, `${suit}-1`, 3) && take(trial, `${suit}-9`, 3) && remainingTotal(trial) === 0) return true;
+		const d = takeUniqueSetWithOnePairedSoft(trial, keys) + takeSoft(trial, `${suit}-1`, 3) + takeSoft(trial, `${suit}-9`, 3);
+		if (d < best) best = d;
 	}
-	return false;
+	return best;
 }
 
-function matchConfusedGates(counts) {
+function distanceConfusedGates(counts) {
+	let best = Infinity;
 	for (const suitRun of SUITS_NUM) {
 		for (const suit1 of SUITS_NUM) {
 			if (suit1 === suitRun) continue;
@@ -557,351 +688,331 @@ function matchConfusedGates(counts) {
 				if (suit9 === suitRun || suit9 === suit1) continue;
 				const trial = cloneCounts(counts);
 				const keys = Array.from({ length: 7 }, (_, i) => `${suitRun}-${i + 2}`);
-				if (!takeUniqueSetWithOnePaired(trial, keys)) continue;
-				if (take(trial, `${suit1}-1`, 3) && take(trial, `${suit9}-9`, 3) && remainingTotal(trial) === 0) return true;
+				const d = takeUniqueSetWithOnePairedSoft(trial, keys) + takeSoft(trial, `${suit1}-1`, 3) + takeSoft(trial, `${suit9}-9`, 3);
+				if (d < best) best = d;
 			}
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchWindyChow(counts) {
+function distanceWindyChow(counts) {
 	const trial = cloneCounts(counts);
-	for (const suit of SUITS_NUM) {
-		if (!takeAnyChow(trial, suit)) return false;
-	}
-	const keys = WIND_RANKS.map((w) => `wind-${w}`);
-	return takeUniqueSetWithOnePaired(trial, keys) && remainingTotal(trial) === 0;
+	let d = 0;
+	for (const suit of SUITS_NUM) d += takeBestChowSoft(trial, suit);
+	d += takeUniqueSetWithOnePairedSoft(trial, WIND_RANKS.map((w) => `wind-${w}`));
+	return d;
 }
 
-// Windy Ones/Nines: the short list doesn't spell out "any Wind paired" here the way Windy
-// Chow does, but one wind is doubled to reach 14 tiles — confirmed.
-function matchWindyRank(counts, rank) {
+// Windy Ones/Nines/Threes/Sevens: the short list doesn't spell out "any Wind paired" here the
+// way Windy Chow does, but one wind is doubled to reach 14 tiles — confirmed.
+function distanceWindyRank(counts, rank) {
 	const trial = cloneCounts(counts);
-	const keys = WIND_RANKS.map((w) => `wind-${w}`);
-	if (!takeUniqueSetWithOnePaired(trial, keys)) return false;
-	for (const suit of SUITS_NUM) if (!take(trial, `${suit}-${rank}`, 3)) return false;
-	return remainingTotal(trial) === 0;
+	let d = takeUniqueSetWithOnePairedSoft(trial, WIND_RANKS.map((w) => `wind-${w}`));
+	for (const suit of SUITS_NUM) d += takeSoft(trial, `${suit}-${rank}`, 3);
+	return d;
 }
 
-function matchHachiBan(counts) {
+function distanceHachiBan(counts) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
-		for (const [lo, hi] of [[1, 8], [2, 9]]) {
+		for (const [lo, hi] of [
+			[1, 8],
+			[2, 9]
+		]) {
 			const base = cloneCounts(counts);
-			if (!takeRunRange(base, suit, lo, hi)) continue;
+			const runDeficit = takeRunRangeSoft(base, suit, lo, hi);
 			for (let skip = 0; skip < WIND_RANKS.length; skip++) {
 				const t2 = cloneCounts(base);
-				let ok = true;
+				let d = runDeficit;
 				for (let wi = 0; wi < WIND_RANKS.length; wi++) {
 					if (wi === skip) continue;
-					if (!take(t2, `wind-${WIND_RANKS[wi]}`, 2)) {
-						ok = false;
-						break;
-					}
+					d += takeSoft(t2, `wind-${WIND_RANKS[wi]}`, 2);
 				}
-				if (ok && remainingTotal(t2) === 0) return true;
+				if (d < best) best = d;
 			}
 			const t3 = cloneCounts(base);
-			if (take(t3, 'dragon-red', 2) && take(t3, 'dragon-green', 2) && take(t3, 'dragon-white', 2) && remainingTotal(t3) === 0) return true;
+			const dDragons = runDeficit + takeSoft(t3, 'dragon-red', 2) + takeSoft(t3, 'dragon-green', 2) + takeSoft(t3, 'dragon-white', 2);
+			if (dDragons < best) best = dDragons;
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchFourBlessings(counts) {
+function distanceFourBlessings(counts) {
 	const trial = cloneCounts(counts);
-	for (const w of WIND_RANKS) if (!take(trial, `wind-${w}`, 3)) return false;
-	const remaining = Object.entries(trial).filter(([, v]) => v > 0);
-	return remaining.length === 1 && remaining[0][1] === 2;
+	let d = 0;
+	for (const w of WIND_RANKS) d += takeSoft(trial, `wind-${w}`, 3);
+	d += takeBestPairInPoolSoft(trial, Object.keys(trial));
+	return d;
 }
 
-function matchWindfall(counts) {
-	const base = cloneCounts(counts);
-	if (!takeEachWind(base)) return false;
+function distanceWindfall(counts) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
-		if (isExactPairsInSuit(cloneCounts(base), suit, 5)) return true;
+		const trial = cloneCounts(counts);
+		const d = takeEachWindSoft(trial) + isExactPairsInSuitSoft(trial, suit, 5);
+		if (d < best) best = d;
 	}
-	return false;
+	return best;
 }
 
-function matchGrandSequence(counts) {
+function distanceGrandSequence(counts) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		const base = cloneCounts(counts);
-		if (!takeRunRange(base, suit, 1, 9)) continue;
+		const runDeficit = takeRunRangeSoft(base, suit, 1, 9);
 		for (const honorKey of [...WIND_RANKS.map((w) => `wind-${w}`), ...DRAGON_RANKS.map((d) => `dragon-${d}`)]) {
 			const t2 = cloneCounts(base);
-			if (!take(t2, honorKey, 3)) continue;
-			const remaining = Object.entries(t2).filter(([, v]) => v > 0);
-			if (remaining.length === 1 && remaining[0][1] === 2 && SUITS_NUM.includes(remaining[0][0].split('-')[0])) return true;
+			const d = runDeficit + takeSoft(t2, honorKey, 3) + takeBestPairInSuitsSoft(t2, SUITS_NUM);
+			if (d < best) best = d;
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchDragonfly(counts) {
+function distanceDragonfly(counts) {
 	const base = cloneCounts(counts);
-	if (!takeEachDragon(base)) return false;
-	for (const suit of SUITS_NUM) {
-		let placed = false;
-		for (let r = 1; r <= 9; r++) {
-			if (take(base, `${suit}-${r}`, 3)) {
-				placed = true;
-				break;
+	const dragonDeficit = takeEachDragonSoft(base);
+	let best = Infinity;
+	for (let r1 = 1; r1 <= 9; r1++) {
+		const t1 = cloneCounts(base);
+		const d1 = takeSoft(t1, `characters-${r1}`, 3);
+		for (let r2 = 1; r2 <= 9; r2++) {
+			const t2 = cloneCounts(t1);
+			const d2 = takeSoft(t2, `bamboo-${r2}`, 3);
+			for (let r3 = 1; r3 <= 9; r3++) {
+				const t3 = cloneCounts(t2);
+				const d3 = takeSoft(t3, `dots-${r3}`, 3);
+				const pairDeficit = takeBestPairInSuitsSoft(t3, SUITS_NUM);
+				const total = dragonDeficit + d1 + d2 + d3 + pairDeficit;
+				if (total < best) best = total;
 			}
 		}
-		if (!placed) return false;
 	}
-	const remaining = Object.entries(base).filter(([, v]) => v > 0);
-	return remaining.length === 1 && remaining[0][1] === 2 && SUITS_NUM.includes(remaining[0][0].split('-')[0]);
+	return best;
 }
 
-function matchDragonsBreath(counts) {
-	const base = cloneCounts(counts);
-	if (!takeUniqueSetWithOnePaired(base, DRAGON_RANKS.map((d) => `dragon-${d}`))) return false;
-	for (const suit of SUITS_NUM) {
-		if (isExactPairsInSuit(cloneCounts(base), suit, 5)) return true;
-	}
-	return false;
-}
-
-function matchWrigglyDragon(counts) {
+function distanceDragonsBreath(counts) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		const base = cloneCounts(counts);
-		if (!takeRunRange(base, suit, 1, 9)) continue;
+		const d = takeUniqueSetWithOnePairedSoft(base, DRAGON_RANKS.map((dr) => `dragon-${dr}`)) + isExactPairsInSuitSoft(base, suit, 5);
+		if (d < best) best = d;
+	}
+	return best;
+}
+
+function distanceWrigglyDragon(counts) {
+	let best = Infinity;
+	for (const suit of SUITS_NUM) {
 		for (const chosen of DRAGON_RANKS) {
-			const t2 = cloneCounts(base);
-			let ok = true;
-			for (const d of DRAGON_RANKS) {
-				if (!take(t2, `dragon-${d}`, d === chosen ? 3 : 1)) {
-					ok = false;
-					break;
-				}
-			}
-			if (ok && remainingTotal(t2) === 0) return true;
+			const trial = cloneCounts(counts);
+			let d = takeRunRangeSoft(trial, suit, 1, 9);
+			for (const dr of DRAGON_RANKS) d += takeSoft(trial, `dragon-${dr}`, dr === chosen ? 3 : 1);
+			if (d < best) best = d;
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchAllPairRubyJade(counts) {
+function distanceAllPairRubyJade(counts) {
 	const base = cloneCounts(counts);
-	if (!take(base, 'dragon-green', 2) || !take(base, 'dragon-red', 2)) return false;
-	const pool = new Set([...RED_BAMBOO_RANKS, ...GREEN_BAMBOO_RANKS]);
-	let pairs = 0;
-	for (const [k, v] of Object.entries(base)) {
-		if (v <= 0) continue;
-		if (!k.startsWith('bamboo-')) return false;
-		if (!pool.has(parseInt(k.split('-')[1], 10))) return false;
-		if (v !== 2) return false;
-		pairs++;
+	let d = takeSoft(base, 'dragon-green', 2) + takeSoft(base, 'dragon-red', 2);
+	const pool = [...RED_BAMBOO_RANKS, ...GREEN_BAMBOO_RANKS].map((r) => `bamboo-${r}`);
+	d += takePairsFromPoolSoft(base, pool, 5);
+	return d;
+}
+
+function distanceSparrowsSanctuary(counts) {
+	const trial = cloneCounts(counts);
+	let d = takeSoft(trial, 'bamboo-1', 4);
+	for (const r of GREEN_BAMBOO_RANKS) d += takeSoft(trial, `bamboo-${r}`, 2);
+	return d;
+}
+
+function distanceColorDragonSuitHand(counts, dragon, suit) {
+	const allRanks = Array.from({ length: 9 }, (_, i) => `${suit}-${i + 1}`);
+	let best = Infinity;
+	for (const pairKey of allRanks) {
+		const trial = cloneCounts(counts);
+		let d = takeSoft(trial, `dragon-${dragon}`, 3);
+		d += takeSoft(trial, pairKey, 2);
+		const pungKeys = allRanks.filter((k) => k !== pairKey);
+		d += takeBestDistinctPungsInPoolSoft(trial, pungKeys, 3);
+		if (d < best) best = d;
 	}
-	return pairs === 5;
+	return best;
 }
 
-function matchSparrowsSanctuary(counts) {
-	const trial = cloneCounts(counts);
-	if (!take(trial, 'bamboo-1', 4)) return false;
-	for (const r of GREEN_BAMBOO_RANKS) if (!take(trial, `bamboo-${r}`, 2)) return false;
-	return remainingTotal(trial) === 0;
-}
-
-function matchColorDragonSuitHand(counts, dragon, suit) {
-	const trial = cloneCounts(counts);
-	if (!take(trial, `dragon-${dragon}`, 3)) return false;
-	const ranksAvailable = [];
-	for (let r = 1; r <= 9; r++) if ((trial[`${suit}-${r}`] || 0) >= 3) ranksAvailable.push(r);
-	for (let i = 0; i < ranksAvailable.length; i++) {
-		for (let j = i + 1; j < ranksAvailable.length; j++) {
-			for (let k = j + 1; k < ranksAvailable.length; k++) {
-				const t2 = cloneCounts(trial);
-				take(t2, `${suit}-${ranksAvailable[i]}`, 3);
-				take(t2, `${suit}-${ranksAvailable[j]}`, 3);
-				take(t2, `${suit}-${ranksAvailable[k]}`, 3);
-				if (isExactPairsInSuit(t2, suit, 1)) return true;
-			}
-		}
-	}
-	return false;
-}
-
-function matchThreeGreatScholars(counts) {
-	const trial = cloneCounts(counts);
-	for (const d of DRAGON_RANKS) if (!take(trial, `dragon-${d}`, 3)) return false;
+function distanceThreeGreatScholars(counts) {
+	const base = cloneCounts(counts);
+	let dragonsDeficit = 0;
+	for (const d of DRAGON_RANKS) dragonsDeficit += takeSoft(base, `dragon-${d}`, 3);
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		for (let r = 1; r <= 9; r++) {
-			const t2 = cloneCounts(trial);
-			if (take(t2, `${suit}-${r}`, 3)) {
-				const remaining = Object.entries(t2).filter(([, v]) => v > 0);
-				if (remaining.length === 1 && remaining[0][1] === 2 && SUITS_NUM.includes(remaining[0][0].split('-')[0])) return true;
-			}
+			const t2 = cloneCounts(base);
+			const dPung = takeSoft(t2, `${suit}-${r}`, 3);
+			const dPair = takeBestPairInSuitsSoft(t2, SUITS_NUM);
+			const total = dragonsDeficit + dPung + dPair;
+			if (total < best) best = total;
 		}
 		for (let r = 1; r <= 7; r++) {
-			const t2 = cloneCounts(trial);
-			if (takeChow(t2, suit, r)) {
-				const remaining = Object.entries(t2).filter(([, v]) => v > 0);
-				if (remaining.length === 1 && remaining[0][1] === 2 && SUITS_NUM.includes(remaining[0][0].split('-')[0])) return true;
-			}
+			const t2 = cloneCounts(base);
+			const dChow = takeChowSoft(t2, suit, r);
+			const dPair = takeBestPairInSuitsSoft(t2, SUITS_NUM);
+			const total = dragonsDeficit + dChow + dPair;
+			if (total < best) best = total;
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchGuardianDragon(counts) {
+function distanceGuardianDragon(counts) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		const base = cloneCounts(counts);
-		if (!takeRunRange(base, suit, 1, 9)) continue;
+		const runDeficit = takeRunRangeSoft(base, suit, 1, 9);
 		for (const pungD of DRAGON_RANKS) {
 			for (const pairD of DRAGON_RANKS) {
 				if (pungD === pairD) continue;
 				const t2 = cloneCounts(base);
-				if (take(t2, `dragon-${pungD}`, 3) && take(t2, `dragon-${pairD}`, 2) && remainingTotal(t2) === 0) return true;
+				const d = runDeficit + takeSoft(t2, `dragon-${pungD}`, 3) + takeSoft(t2, `dragon-${pairD}`, 2);
+				if (d < best) best = d;
 			}
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchUniqueWonder(counts) {
+function distanceUniqueWonder(counts) {
 	const keys = [
 		...WIND_RANKS.map((w) => `wind-${w}`),
 		...DRAGON_RANKS.map((d) => `dragon-${d}`),
 		...SUITS_NUM.flatMap((s) => [`${s}-1`, `${s}-9`])
 	];
-	const trial = cloneCounts(counts);
-	return takeUniqueSetWithOnePaired(trial, keys) && remainingTotal(trial) === 0;
+	return takeUniqueSetWithOnePairedSoft(cloneCounts(counts), keys);
 }
 
-function matchFiveOddHonours(counts) {
+function distanceFiveOddHonours(counts) {
 	const honorKeys = [...WIND_RANKS.map((w) => `wind-${w}`), ...DRAGON_RANKS.map((d) => `dragon-${d}`)];
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		const base = cloneCounts(counts);
-		if (!takeRunRange(base, suit, 1, 9)) continue;
-		let honorCount = 0;
-		let ok = true;
-		for (const k of honorKeys) {
-			const c = base[k] || 0;
-			if (c === 1) honorCount++;
-			else if (c !== 0) {
-				ok = false;
-				break;
-			}
-		}
-		if (ok && honorCount === 5 && remainingTotal(base) === 5) return true;
+		const runDeficit = takeRunRangeSoft(base, suit, 1, 9);
+		const options = honorKeys.map((k) => ((base[k] || 0) >= 1 ? 0 : 1)).sort((a, b) => a - b);
+		let honorDeficit = 0;
+		for (let i = 0; i < 5; i++) honorDeficit += options[i];
+		const d = runDeficit + honorDeficit;
+		if (d < best) best = d;
 	}
-	return false;
+	return best;
 }
 
-function matchDragonsTail(counts) {
+function distanceDragonsTail(counts) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		const base = cloneCounts(counts);
-		if (!takeRunRange(base, suit, 1, 9)) continue;
+		const runDeficit = takeRunRangeSoft(base, suit, 1, 9);
 		for (const d of DRAGON_RANKS) {
 			for (const w of WIND_RANKS) {
 				const t2 = cloneCounts(base);
-				if (take(t2, `dragon-${d}`, 3) && take(t2, `wind-${w}`, 2) && remainingTotal(t2) === 0) return true;
+				const dist1 = runDeficit + takeSoft(t2, `dragon-${d}`, 3) + takeSoft(t2, `wind-${w}`, 2);
+				if (dist1 < best) best = dist1;
 				const t3 = cloneCounts(base);
-				if (take(t3, `wind-${w}`, 3) && take(t3, `dragon-${d}`, 2) && remainingTotal(t3) === 0) return true;
+				const dist2 = runDeficit + takeSoft(t3, `wind-${w}`, 3) + takeSoft(t3, `dragon-${d}`, 2);
+				if (dist2 < best) best = dist2;
 			}
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchHoveringAngel(counts, ctx) {
+function distanceHoveringAngel(counts, ctx) {
 	const base = cloneCounts(counts);
-	if (!take(base, `wind-${ctx.seatWind}`, 3)) return false;
-	for (const suit of SUITS_NUM) {
-		if (!takeAnyChow(base, suit)) return false;
-	}
-	for (const d of DRAGON_RANKS) {
+	let d = takeSoft(base, `wind-${ctx.seatWind}`, 3);
+	for (const suit of SUITS_NUM) d += takeBestChowSoft(base, suit);
+	let best = Infinity;
+	for (const dr of DRAGON_RANKS) {
 		const t2 = cloneCounts(base);
-		if (take(t2, `dragon-${d}`, 2) && remainingTotal(t2) === 0) return true;
+		const dist = d + takeSoft(t2, `dragon-${dr}`, 2);
+		if (dist < best) best = dist;
 	}
-	return false;
+	return best;
 }
 
-function matchHeavenlyTwins(counts) {
+function distanceHeavenlyTwins(counts) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
-		if (isExactPairsInSuit(cloneCounts(counts), suit, 7)) return true;
+		const d = isExactPairsInSuitSoft(cloneCounts(counts), suit, 7);
+		if (d < best) best = d;
 	}
-	return false;
+	return best;
 }
 
-// "All Pair" (500) vs "All Pair Honours" (1000): read as plain Seven Pairs (any tiles)
-// vs. the stricter version where every pair must be a terminal/Wind/Dragon — best-effort
-// reading of two short-list rows that would otherwise look like the same hand.
-function matchAllPair(counts) {
-	let total = 0;
-	for (const v of Object.values(counts)) {
-		if (v % 2 !== 0) return false;
-		total += v;
-	}
-	return total === 14;
+// "All Pair" (500) vs "All Pair Honours" (1000): read as plain Seven Pairs (any tiles) vs.
+// the stricter version where every pair must be a terminal/Wind/Dragon — best-effort reading
+// of two short-list rows that would otherwise look like the same hand.
+function distanceAllPair(counts) {
+	const allKeys = [
+		...SUITS_NUM.flatMap((s) => Array.from({ length: 9 }, (_, i) => `${s}-${i + 1}`)),
+		...WIND_RANKS.map((w) => `wind-${w}`),
+		...DRAGON_RANKS.map((d) => `dragon-${d}`)
+	];
+	return takePairsFromPoolSoft(cloneCounts(counts), allKeys, 7);
 }
 
-function matchAllPairHonours(counts) {
-	let total = 0;
-	for (const [k, v] of Object.entries(counts)) {
-		if (v <= 0) continue;
-		if (v % 2 !== 0) return false;
-		const [suit, rank] = k.split('-');
-		if (!(suit === 'wind' || suit === 'dragon' || rank === '1' || rank === '9')) return false;
-		total += v;
-	}
-	return total === 14;
+function distanceAllPairHonours(counts) {
+	const pool = [
+		...WIND_RANKS.map((w) => `wind-${w}`),
+		...DRAGON_RANKS.map((d) => `dragon-${d}`),
+		...SUITS_NUM.flatMap((s) => [`${s}-1`, `${s}-9`])
+	];
+	return takePairsFromPoolSoft(cloneCounts(counts), pool, 7);
 }
 
-// Knitting: seven distinct numbers, each held as a pair confined to one of two chosen
-// suits (no third suit, no honors) — confirmed: "7 pairs same number in 2 suits", each
-// individual pair same-suit.
-function matchKnitting(counts) {
+// Knitting: seven distinct numbers, each held as a pair confined to one of two chosen suits
+// (no third suit, no honors) — confirmed: "7 pairs same number in 2 suits", each individual
+// pair same-suit.
+function distanceKnitting(counts) {
+	let best = Infinity;
 	for (const suitA of SUITS_NUM) {
 		for (const suitB of SUITS_NUM) {
 			if (suitA === suitB) continue;
-			const other = SUITS_NUM.find((s) => s !== suitA && s !== suitB);
-			let usesOutside = false;
-			for (const [k, v] of Object.entries(counts)) {
-				if (v > 0 && (k.startsWith(`${other}-`) || k.startsWith('wind-') || k.startsWith('dragon-'))) usesOutside = true;
-			}
-			if (usesOutside) continue;
-			let pairRanks = 0;
-			let ok = true;
+			const options = [];
 			for (let r = 1; r <= 9; r++) {
-				const ca = counts[`${suitA}-${r}`] || 0;
-				const cb = counts[`${suitB}-${r}`] || 0;
-				const total = ca + cb;
-				if (total === 0) continue;
-				if (total !== 2 || (ca !== 2 && cb !== 2)) {
-					ok = false;
-					break;
-				}
-				pairRanks++;
+				const dA = Math.max(0, 2 - (counts[`${suitA}-${r}`] || 0));
+				const dB = Math.max(0, 2 - (counts[`${suitB}-${r}`] || 0));
+				options.push(Math.min(dA, dB));
 			}
-			if (ok && pairRanks === 7) return true;
+			options.sort((a, b) => a - b);
+			let d = 0;
+			for (let i = 0; i < 7; i++) d += options[i];
+			if (d < best) best = d;
 		}
 	}
-	return false;
+	return best;
 }
 
 // Triple Knitting: four numbers each held once in all three suits, plus one same-suit pair —
 // confirmed: "4 sets same number in 3 suits + knitting pair".
-function matchTripleKnitting(counts) {
-	const ranks = [];
-	for (let r = 1; r <= 9; r++) if (SUITS_NUM.every((s) => (counts[`${s}-${r}`] || 0) >= 1)) ranks.push(r);
-	for (let a = 0; a < ranks.length; a++) {
-		for (let b = a + 1; b < ranks.length; b++) {
-			for (let c = b + 1; c < ranks.length; c++) {
-				for (let d = c + 1; d < ranks.length; d++) {
-					const chosen = [ranks[a], ranks[b], ranks[c], ranks[d]];
-					const trial = cloneCounts(counts);
-					for (const r of chosen) for (const s of SUITS_NUM) take(trial, `${s}-${r}`, 1);
-					const remaining = Object.entries(trial).filter(([, v]) => v > 0);
-					if (remaining.length === 1 && remaining[0][1] === 2) return true;
-				}
-			}
-		}
+function distanceTripleKnitting(counts) {
+	const trial = cloneCounts(counts);
+	const rankCosts = [];
+	for (let r = 1; r <= 9; r++) {
+		let cost = 0;
+		for (const s of SUITS_NUM) cost += Math.max(0, 1 - (trial[`${s}-${r}`] || 0));
+		rankCosts.push({ r, cost });
 	}
-	return false;
+	rankCosts.sort((a, b) => a.cost - b.cost);
+	let d = 0;
+	for (let i = 0; i < 4; i++) {
+		d += rankCosts[i].cost;
+		for (const s of SUITS_NUM) takeSoft(trial, `${s}-${rankCosts[i].r}`, 1);
+	}
+	d += takeBestPairInPoolSoft(trial, Object.keys(trial));
+	return d;
 }
 
 // Big Robert: best-effort reading, FLAGGED for a closer look at page 14 — a run of four
@@ -909,80 +1020,30 @@ function matchTripleKnitting(counts) {
 // same = L)" limit-hand bonus isn't applied. There may also be a distinct "Little Robert"
 // (500/200, "Chow in each suit + P/K + Pr in any suit") that this short-list entry relates
 // to — unconfirmed, and that pattern doesn't obviously match "Big Robert" as coded here.
-function matchBigRobert(counts) {
+function distanceBigRobert(counts) {
 	const base = cloneCounts(counts);
-	for (const suit of SUITS_NUM) {
-		let placed = false;
-		for (let r = 1; r <= 6; r++) {
-			const t2 = cloneCounts(base);
-			if (take(t2, `${suit}-${r}`, 1) && take(t2, `${suit}-${r + 1}`, 1) && take(t2, `${suit}-${r + 2}`, 1) && take(t2, `${suit}-${r + 3}`, 1)) {
-				Object.assign(base, t2);
-				placed = true;
-				break;
-			}
-		}
-		if (!placed) return false;
-	}
-	for (const key of [...WIND_RANKS.map((w) => `wind-${w}`), ...DRAGON_RANKS.map((d) => `dragon-${d}`)]) {
-		const t2 = cloneCounts(base);
-		if (take(t2, key, 2) && remainingTotal(t2) === 0) return true;
-	}
-	return false;
+	let d = 0;
+	for (const suit of SUITS_NUM) d += takeBestFourRunSoft(base, suit);
+	d += takeBestPairInPoolSoft(base, [...WIND_RANKS.map((w) => `wind-${w}`), ...DRAGON_RANKS.map((dr) => `dragon-${dr}`)]);
+	return d;
 }
 
 // Moon at Bottom of Well: "three in ascending order" = a Run 1-9 (123, 456, 789), plus a
 // fourth chow and a pair on top of that, all in Dots.
-function matchMoonAtBottomOfWell(counts) {
+function distanceMoonAtBottomOfWell(counts) {
 	const suit = 'dots';
 	const base = cloneCounts(counts);
-	if (!takeRunRange(base, suit, 1, 9)) return false;
+	const runDeficit = takeRunRangeSoft(base, suit, 1, 9);
+	let best = Infinity;
 	for (let cr = 1; cr <= 7; cr++) {
 		const t2 = cloneCounts(base);
-		if (!takeChow(t2, suit, cr)) continue;
-		const remaining = Object.entries(t2).filter(([, v]) => v > 0);
-		if (remaining.length === 1 && remaining[0][1] === 2 && remaining[0][0].startsWith(`${suit}-`)) return true;
+		const dChow = takeChowSoft(t2, suit, cr);
+		const dPair = takeBestPairInSuitsSoft(t2, [suit]);
+		const total = runDeficit + dChow + dPair;
+		if (total < best) best = total;
 	}
-	return false;
+	return best;
 }
-
-const SPECIAL_HANDS = [
-	{ name: 'Wriggly Snake', winning: 1000, fishing: 400, matches: (c) => matchWrigglySnake(c) },
-	{ name: 'Run, Pung & Pair', winning: 1000, fishing: 400, matches: (c) => matchRunPungPair(c) },
-	{ name: "Greta's Garden", winning: 1000, fishing: 400, matches: (c) => matchGretasGarden(c) },
-	{ name: "Greta's Dragon", winning: 1000, fishing: 400, matches: (c) => matchGretasDragon(c) },
-	{ name: "Gertie's Garter", winning: 1000, fishing: 400, matches: (c) => matchGertiesGarter(c) },
-	{ name: 'Red Lantern', winning: 2000, fishing: 800, matches: (c, ctx) => matchRedLantern(c, ctx) },
-	{ name: 'Gates of Heaven', winning: 1000, fishing: 400, matches: (c) => matchGatesOfHeaven(c) },
-	{ name: 'Confused Gates', winning: 1000, fishing: 400, matches: (c) => matchConfusedGates(c) },
-	{ name: 'Windy Chow', winning: 500, fishing: 200, matches: (c) => matchWindyChow(c) },
-	{ name: 'Big Robert', winning: 500, fishing: 200, matches: (c) => matchBigRobert(c) },
-	{ name: 'Moon at Bottom of Well', winning: 1000, fishing: 400, matches: (c) => matchMoonAtBottomOfWell(c) },
-	{ name: 'Knitting', winning: 500, fishing: 200, matches: (c) => matchKnitting(c) },
-	{ name: 'Triple Knitting', winning: 500, fishing: 200, matches: (c) => matchTripleKnitting(c) },
-	{ name: 'All Pair', winning: 500, fishing: 200, matches: (c) => matchAllPair(c) },
-	{ name: 'All Pair Honours', winning: 1000, fishing: 400, matches: (c) => matchAllPairHonours(c) },
-	{ name: 'Heavenly Twins', winning: 1000, fishing: 400, matches: (c) => matchHeavenlyTwins(c) },
-	{ name: 'Windfall', winning: 1000, fishing: 400, matches: (c) => matchWindfall(c) },
-	{ name: 'All Pair Ruby Jade', winning: 1000, fishing: 400, matches: (c) => matchAllPairRubyJade(c) },
-	{ name: "Sparrow's Sanctuary", winning: 1500, fishing: 600, matches: (c) => matchSparrowsSanctuary(c) },
-	{ name: 'Windy Ones', winning: 1000, fishing: 400, matches: (c) => matchWindyRank(c, 1) },
-	{ name: 'Windy Nines', winning: 1000, fishing: 400, matches: (c) => matchWindyRank(c, 9) },
-	{ name: 'Hachi Ban', winning: 1000, fishing: 400, matches: (c) => matchHachiBan(c) },
-	{ name: 'Four Blessings', winning: 1500, fishing: 600, matches: (c) => matchFourBlessings(c) },
-	{ name: 'Grand Sequence', winning: 1000, fishing: 400, matches: (c) => matchGrandSequence(c) },
-	{ name: 'Dragonfly', winning: 1000, fishing: 400, matches: (c) => matchDragonfly(c) },
-	{ name: "Dragon's Breath", winning: 1000, fishing: 400, matches: (c) => matchDragonsBreath(c) },
-	{ name: 'Wriggly Dragon', winning: 1000, fishing: 400, matches: (c) => matchWrigglyDragon(c) },
-	{ name: 'Green Jade', winning: 1000, fishing: 400, matches: (c) => matchColorDragonSuitHand(c, 'green', 'bamboo') },
-	{ name: 'Red Coral', winning: 1000, fishing: 400, matches: (c) => matchColorDragonSuitHand(c, 'red', 'characters') },
-	{ name: 'White Opal', winning: 1000, fishing: 400, matches: (c) => matchColorDragonSuitHand(c, 'white', 'dots') },
-	{ name: 'Guardian Dragon', winning: 1000, fishing: 400, matches: (c) => matchGuardianDragon(c) },
-	{ name: 'Three Great Scholars', winning: 1500, fishing: 600, matches: (c) => matchThreeGreatScholars(c) },
-	{ name: 'Unique Wonder', winning: 2000, fishing: 800, matches: (c) => matchUniqueWonder(c) },
-	{ name: 'Five Odd Honours', winning: 500, fishing: 200, matches: (c) => matchFiveOddHonours(c) },
-	{ name: "Dragon's Tail", winning: 1000, fishing: 400, matches: (c) => matchDragonsTail(c) },
-	{ name: 'Hovering Angel', winning: 1000, fishing: 400, matches: (c, ctx) => matchHoveringAngel(c, ctx) }
-];
 
 // ---------- Full List (The Mah Jong Player's Companion, "Full Synopsis of Special Hands",
 // pp.56-60) ----------
@@ -997,868 +1058,769 @@ const ODD_RANKS = [1, 3, 5, 7, 9];
 const EVEN_RANKS = [2, 4, 6, 8];
 const BLUE_CIRCLE_RANKS = [2, 3, 4, 5, 8, 9];
 
-function matchGuardianWinds(counts) {
+function distanceGuardianWinds(counts) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		const base = cloneCounts(counts);
-		if (!takeRunRange(base, suit, 1, 9)) continue;
+		const runDeficit = takeRunRangeSoft(base, suit, 1, 9);
 		for (const pungW of WIND_RANKS) {
 			for (const pairW of WIND_RANKS) {
 				if (pungW === pairW) continue;
 				const t2 = cloneCounts(base);
-				if (take(t2, `wind-${pungW}`, 3) && take(t2, `wind-${pairW}`, 2) && remainingTotal(t2) === 0) return true;
+				const d = runDeficit + takeSoft(t2, `wind-${pungW}`, 3) + takeSoft(t2, `wind-${pairW}`, 2);
+				if (d < best) best = d;
 			}
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchDragonsGates(counts) {
+function distanceDragonsGates(counts) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
-		const trial = cloneCounts(counts);
+		const base = cloneCounts(counts);
 		const keys = Array.from({ length: 7 }, (_, i) => `${suit}-${i + 2}`);
-		if (!takeUniqueSetWithOnePaired(trial, keys)) continue;
+		const baseDeficit = takeUniqueSetWithOnePairedSoft(base, keys);
 		const dragon = CORRESPONDING_DRAGON[suit];
 		for (const terminal of [1, 9]) {
-			const t2 = cloneCounts(trial);
-			if (take(t2, `${suit}-${terminal}`, 3) && take(t2, `dragon-${dragon}`, 3) && remainingTotal(t2) === 0) return true;
+			const t2 = cloneCounts(base);
+			const d = baseDeficit + takeSoft(t2, `${suit}-${terminal}`, 3) + takeSoft(t2, `dragon-${dragon}`, 3);
+			if (d < best) best = d;
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchDragonsTeeth(counts) {
+function distanceDragonsTeeth(counts) {
+	let best = Infinity;
 	for (const suit of ['characters', 'dots']) {
 		const base = cloneCounts(counts);
-		if (!take(base, 'dragon-red', 3) || !take(base, 'dragon-white', 3)) continue;
+		const dragonsDeficit = takeSoft(base, 'dragon-red', 3) + takeSoft(base, 'dragon-white', 3);
 		for (const lo of [1, 2]) {
-			const keys = Array.from({ length: 7 }, (_, i) => `${suit}-${lo + i}`);
 			const t2 = cloneCounts(base);
-			if (takeUniqueSetWithOnePaired(t2, keys) && remainingTotal(t2) === 0) return true;
+			const keys = Array.from({ length: 7 }, (_, i) => `${suit}-${lo + i}`);
+			const d = dragonsDeficit + takeUniqueSetWithOnePairedSoft(t2, keys);
+			if (d < best) best = d;
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchYinYang(counts) {
+function distanceYinYang(counts) {
+	let best = Infinity;
 	for (const suitA of SUITS_NUM) {
 		for (const suitB of SUITS_NUM) {
 			if (suitA === suitB) continue;
 			const trial = cloneCounts(counts);
-			if (
-				take(trial, `${suitA}-1`, 2) &&
-				take(trial, `${suitA}-2`, 1) &&
-				take(trial, `${suitA}-3`, 1) &&
-				take(trial, `${suitA}-4`, 1) &&
-				take(trial, `${suitA}-5`, 2) &&
-				take(trial, `${suitB}-5`, 2) &&
-				take(trial, `${suitB}-6`, 1) &&
-				take(trial, `${suitB}-7`, 1) &&
-				take(trial, `${suitB}-8`, 1) &&
-				take(trial, `${suitB}-9`, 2) &&
-				remainingTotal(trial) === 0
-			) {
-				return true;
-			}
+			const d =
+				takeSoft(trial, `${suitA}-1`, 2) +
+				takeSoft(trial, `${suitA}-2`, 1) +
+				takeSoft(trial, `${suitA}-3`, 1) +
+				takeSoft(trial, `${suitA}-4`, 1) +
+				takeSoft(trial, `${suitA}-5`, 2) +
+				takeSoft(trial, `${suitB}-5`, 2) +
+				takeSoft(trial, `${suitB}-6`, 1) +
+				takeSoft(trial, `${suitB}-7`, 1) +
+				takeSoft(trial, `${suitB}-8`, 1) +
+				takeSoft(trial, `${suitB}-9`, 2);
+			if (d < best) best = d;
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchThreePhilosophers(counts) {
+function distanceThreePhilosophers(counts) {
 	const base = cloneCounts(counts);
-	for (const suit of SUITS_NUM) {
-		if (!takeAnyChow(base, suit)) return false;
-	}
+	let d = 0;
+	for (const suit of SUITS_NUM) d += takeBestChowSoft(base, suit);
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		for (let r = 1; r <= 7; r++) {
 			const t2 = cloneCounts(base);
-			if (!takeChow(t2, suit, r)) continue;
-			const remaining = Object.entries(t2).filter(([, v]) => v > 0);
-			if (remaining.length === 1 && remaining[0][1] === 2 && SUITS_NUM.includes(remaining[0][0].split('-')[0])) return true;
+			const dChow = takeChowSoft(t2, suit, r);
+			const dPair = takeBestPairInSuitsSoft(t2, SUITS_NUM);
+			const total = d + dChow + dPair;
+			if (total < best) best = total;
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchCrazyChows(counts) {
-	function search(remainingChows, trial) {
-		if (remainingChows === 0) {
-			const remaining = Object.entries(trial).filter(([, v]) => v > 0);
-			return remaining.length === 1 && remaining[0][1] === 2 && SUITS_NUM.includes(remaining[0][0].split('-')[0]);
-		}
+function distanceCrazyChows(counts, ctx, maxDistance) {
+	function search(remainingChows, trial, soFar) {
+		if (soFar > maxDistance) return Infinity;
+		if (remainingChows === 0) return soFar + takeBestPairInSuitsSoft(trial, SUITS_NUM);
+		let best = Infinity;
 		for (const suit of SUITS_NUM) {
 			for (let r = 1; r <= 7; r++) {
 				const t2 = cloneCounts(trial);
-				if (takeChow(t2, suit, r) && search(remainingChows - 1, t2)) return true;
+				const d = takeChowSoft(t2, suit, r);
+				const total = search(remainingChows - 1, t2, soFar + d);
+				if (total < best) best = total;
 			}
 		}
-		return false;
+		return best;
 	}
-	return search(4, cloneCounts(counts));
+	return search(4, cloneCounts(counts), 0);
 }
 
-function matchLittleRobert(counts) {
+function distanceLittleRobert(counts) {
 	const base = cloneCounts(counts);
-	for (const suit of SUITS_NUM) {
-		if (!takeAnyChow(base, suit)) return false;
-	}
+	let d = 0;
+	for (const suit of SUITS_NUM) d += takeBestChowSoft(base, suit);
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		for (let r = 1; r <= 9; r++) {
 			const t2 = cloneCounts(base);
-			if (!take(t2, `${suit}-${r}`, 3)) continue;
-			const remaining = Object.entries(t2).filter(([, v]) => v > 0);
-			if (remaining.length === 1 && remaining[0][1] === 2 && SUITS_NUM.includes(remaining[0][0].split('-')[0])) return true;
+			const dPung = takeSoft(t2, `${suit}-${r}`, 3);
+			const dPair = takeBestPairInSuitsSoft(t2, SUITS_NUM);
+			const total = d + dPung + dPair;
+			if (total < best) best = total;
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchChowRankTriple(counts, startRank) {
+function distanceChowRankTriple(counts, startRank) {
 	const trial = cloneCounts(counts);
-	for (const suit of SUITS_NUM) {
-		if (!takeChow(trial, suit, startRank)) return false;
-	}
-	const keys = WIND_RANKS.map((w) => `wind-${w}`);
-	return takeUniqueSetWithOnePaired(trial, keys) && remainingTotal(trial) === 0;
+	let d = 0;
+	for (const suit of SUITS_NUM) d += takeChowSoft(trial, suit, startRank);
+	d += takeUniqueSetWithOnePairedSoft(trial, WIND_RANKS.map((w) => `wind-${w}`));
+	return d;
 }
 
-function matchChopSuey(counts) {
-	return matchChowRankTriple(counts, 1);
+function distanceChopSuey(counts) {
+	return distanceChowRankTriple(counts, 1);
 }
 
-function matchChowMien(counts) {
-	return matchChowRankTriple(counts, 7);
+function distanceChowMien(counts) {
+	return distanceChowRankTriple(counts, 7);
 }
 
-function matchLittleBrother(counts, ctx) {
+function distanceLittleBrother(counts, ctx) {
 	const base = cloneCounts(counts);
-	for (const suit of SUITS_NUM) {
-		if (!takeAnyChow(base, suit)) return false;
-	}
-	if (!take(base, `wind-${ctx.seatWind}`, 2)) return false;
-	for (const suit of SUITS_NUM) {
-		for (let r = 1; r <= 7; r++) {
-			const t2 = cloneCounts(base);
-			if (takeChow(t2, suit, r) && remainingTotal(t2) === 0) return true;
-		}
-	}
-	return false;
+	let d = 0;
+	for (const suit of SUITS_NUM) d += takeBestChowSoft(base, suit);
+	d += takeSoft(base, `wind-${ctx.seatWind}`, 2);
+	d += takeBestChowAcrossSuitsSoft(base, SUITS_NUM);
+	return d;
 }
 
-function matchAppleBlossom(counts) {
-	function search(remainingChows, trial) {
-		if (remainingChows === 0) return take(trial, 'dragon-white', 3) && take(trial, 'dragon-green', 2) && remainingTotal(trial) === 0;
+function distanceAppleBlossom(counts, ctx, maxDistance) {
+	function search(remainingChows, trial, soFar) {
+		if (soFar > maxDistance) return Infinity;
+		if (remainingChows === 0) return soFar + takeSoft(trial, 'dragon-white', 3) + takeSoft(trial, 'dragon-green', 2);
+		let best = Infinity;
 		for (const suit of SUITS_NUM) {
 			for (let r = 1; r <= 7; r++) {
 				const t2 = cloneCounts(trial);
-				if (takeChow(t2, suit, r) && search(remainingChows - 1, t2)) return true;
+				const d = takeChowSoft(t2, suit, r);
+				const total = search(remainingChows - 1, t2, soFar + d);
+				if (total < best) best = total;
 			}
 		}
-		return false;
+		return best;
 	}
-	return search(3, cloneCounts(counts));
+	return search(3, cloneCounts(counts), 0);
 }
 
-function matchTheProfessors(counts, ctx) {
-	function search(remainingChows, trial) {
-		if (remainingChows === 0) return takeEachDragon(trial) && take(trial, `wind-${ctx.seatWind}`, 2) && remainingTotal(trial) === 0;
+function distanceTheProfessors(counts, ctx, maxDistance) {
+	function search(remainingChows, trial, soFar) {
+		if (soFar > maxDistance) return Infinity;
+		if (remainingChows === 0) return soFar + takeEachDragonSoft(trial) + takeSoft(trial, `wind-${ctx.seatWind}`, 2);
+		let best = Infinity;
 		for (const suit of SUITS_NUM) {
 			for (let r = 1; r <= 7; r++) {
 				const t2 = cloneCounts(trial);
-				if (takeChow(t2, suit, r) && search(remainingChows - 1, t2)) return true;
+				const d = takeChowSoft(t2, suit, r);
+				const total = search(remainingChows - 1, t2, soFar + d);
+				if (total < best) best = total;
 			}
 		}
-		return false;
+		return best;
 	}
-	return search(3, cloneCounts(counts));
+	return search(3, cloneCounts(counts), 0);
 }
 
 // Chow Chow requires the whole hand to have come from self-drawn wall tiles with no calls,
 // ending on the last tile in the wall. `ctx.selfDraw`/`ctx.wonWithLastWallTile` are only set
-// when scoring an actual win (see applySpecialWinnerScore) — in a fishing check they're
-// undefined, so only the concealment/shape requirement is checked there.
-function matchChowChow(counts, ctx) {
-	if (!ctx.player || !ctx.player.melds.every((m) => m.concealed)) return false;
-	if (ctx.selfDraw === false || ctx.wonWithLastWallTile === false) return false;
+// when scoring an actual win (see applySpecialWinnerScore) — in a fishing/preview check
+// they're undefined, so only the concealment/shape requirement (knowable in advance) applies.
+function distanceChowChow(counts, ctx, maxDistance) {
+	if (!ctx.player || !ctx.player.melds.every((m) => m.concealed)) return Infinity;
+	if (ctx.selfDraw === false || ctx.wonWithLastWallTile === false) return Infinity;
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
-		function search(remainingChows, trial) {
-			if (remainingChows === 0) {
-				const remaining = Object.entries(trial).filter(([, v]) => v > 0);
-				return remaining.length === 1 && remaining[0][1] === 2 && remaining[0][0].startsWith(`${suit}-`);
-			}
+		function search(remainingChows, trial, soFar) {
+			if (soFar > maxDistance) return Infinity;
+			if (remainingChows === 0) return soFar + takeBestPairInSuitsSoft(trial, [suit]);
+			let localBest = Infinity;
 			for (let r = 1; r <= 7; r++) {
 				const t2 = cloneCounts(trial);
-				if (takeChow(t2, suit, r) && search(remainingChows - 1, t2)) return true;
+				const d = takeChowSoft(t2, suit, r);
+				const total = search(remainingChows - 1, t2, soFar + d);
+				if (total < localBest) localBest = total;
 			}
-			return false;
+			return localBest;
 		}
-		if (search(4, cloneCounts(counts))) return true;
+		const d = search(4, cloneCounts(counts), 0);
+		if (d < best) best = d;
 	}
-	return false;
+	return best;
 }
 
-function matchOddsAndEvens(counts) {
+function distanceOddsAndEvens(counts) {
+	let best = Infinity;
 	for (const evenSuit of SUITS_NUM) {
 		const oddSuits = SUITS_NUM.filter((s) => s !== evenSuit);
 		const trial = cloneCounts(counts);
-		let ok = true;
-		for (const suit of oddSuits) {
-			for (const r of ODD_RANKS) {
-				if (!take(trial, `${suit}-${r}`, 1)) {
-					ok = false;
-					break;
-				}
-			}
-			if (!ok) break;
-		}
-		if (!ok) continue;
-		for (const r of EVEN_RANKS) {
-			if (!take(trial, `${evenSuit}-${r}`, 1)) {
-				ok = false;
-				break;
-			}
-		}
-		if (ok && remainingTotal(trial) === 0) return true;
+		let d = 0;
+		for (const suit of oddSuits) for (const r of ODD_RANKS) d += takeSoft(trial, `${suit}-${r}`, 1);
+		for (const r of EVEN_RANKS) d += takeSoft(trial, `${evenSuit}-${r}`, 1);
+		if (d < best) best = d;
 	}
-	return false;
+	return best;
 }
 
-function matchHeadsAndTails(counts) {
+function distanceHeadsAndTails(counts) {
 	const terminalKeys = SUITS_NUM.flatMap((s) => [`${s}-1`, `${s}-9`]);
-	function chooseMelds(remaining, trial) {
-		if (remaining === 0) {
-			const rem = Object.entries(trial).filter(([, v]) => v > 0);
-			return rem.length === 1 && rem[0][1] === 2 && terminalKeys.includes(rem[0][0]);
-		}
-		for (const key of terminalKeys) {
-			const t2 = cloneCounts(trial);
-			if (take(t2, key, 3) && chooseMelds(remaining - 1, t2)) return true;
-		}
-		return false;
+	let best = Infinity;
+	for (const pairKey of terminalKeys) {
+		const trial = cloneCounts(counts);
+		const pairDeficit = takeSoft(trial, pairKey, 2);
+		const pungKeys = terminalKeys.filter((k) => k !== pairKey);
+		const pungDeficit = takeBestDistinctPungsInPoolSoft(trial, pungKeys, 4);
+		const total = pairDeficit + pungDeficit;
+		if (total < best) best = total;
 	}
-	return chooseMelds(4, cloneCounts(counts));
+	return best;
 }
 
-function matchRobin(counts) {
+function distanceRobin(counts) {
+	let best = Infinity;
 	for (const suitA of SUITS_NUM) {
 		for (const suitB of SUITS_NUM) {
 			if (suitB === suitA) continue;
 			const suitC = SUITS_NUM.find((s) => s !== suitA && s !== suitB);
 			for (let ra = 1; ra <= 7; ra++) {
 				const t1 = cloneCounts(counts);
-				if (!takeChow(t1, suitA, ra)) continue;
+				const dA = takeChowSoft(t1, suitA, ra);
 				for (let rb1 = 1; rb1 <= 7; rb1++) {
 					const t2 = cloneCounts(t1);
-					if (!takeChow(t2, suitB, rb1)) continue;
+					const dB1 = takeChowSoft(t2, suitB, rb1);
 					for (let rb2 = 1; rb2 <= 7; rb2++) {
 						const t3 = cloneCounts(t2);
-						if (!takeChow(t3, suitB, rb2)) continue;
+						const dB2 = takeChowSoft(t3, suitB, rb2);
 						for (let rc = 1; rc <= 7; rc++) {
 							const t4 = cloneCounts(t3);
-							if (!takeChow(t4, suitC, rc)) continue;
-							const remaining = Object.entries(t4).filter(([, v]) => v > 0);
-							if (remaining.length === 1 && remaining[0][1] === 2 && remaining[0][0].startsWith(`${suitC}-`)) return true;
+							const dC = takeChowSoft(t4, suitC, rc);
+							const dPair = takeBestPairInSuitsSoft(t4, [suitC]);
+							const total = dA + dB1 + dB2 + dC + dPair;
+							if (total < best) best = total;
 						}
 					}
 				}
 			}
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchAllPairJade(counts) {
+function distanceAllPairJade(counts) {
 	const optionA = cloneCounts(counts);
-	if (take(optionA, 'dragon-green', 2)) {
-		let pairs = 0;
-		let ok = true;
-		for (const [k, v] of Object.entries(optionA)) {
-			if (v <= 0) continue;
-			if (!k.startsWith('bamboo-') || !GREEN_BAMBOO_RANKS.includes(parseInt(k.split('-')[1], 10)) || (v !== 2 && v !== 4)) {
-				ok = false;
-				break;
-			}
-			pairs += v / 2;
-		}
-		if (ok && pairs === 6) return true;
-	}
+	const dA = takeSoft(optionA, 'dragon-green', 2) + takePairsFromPoolSoft(optionA, GREEN_BAMBOO_RANKS.map((r) => `bamboo-${r}`), 6);
 	const optionB = cloneCounts(counts);
-	if (take(optionB, 'dragon-green', 4)) {
-		let pairs = 0;
-		let ok = true;
-		for (const [k, v] of Object.entries(optionB)) {
-			if (v <= 0) continue;
-			if (!k.startsWith('bamboo-') || !GREEN_BAMBOO_RANKS.includes(parseInt(k.split('-')[1], 10)) || v !== 2) {
-				ok = false;
-				break;
-			}
-			pairs++;
-		}
-		if (ok && pairs === 5) return true;
-	}
-	return false;
+	const dB = takeSoft(optionB, 'dragon-green', 4) + takePairsFromPoolSoft(optionB, GREEN_BAMBOO_RANKS.map((r) => `bamboo-${r}`), 5);
+	return Math.min(dA, dB);
 }
 
-function matchImperialJade(counts) {
-	for (const dragonCount of [3, 4]) {
-		const base = cloneCounts(counts);
-		if (!take(base, 'dragon-green', dragonCount)) continue;
-		function search(remaining, trial, chowUsed) {
-			if (remaining === 0) {
-				const rem = Object.entries(trial).filter(([, v]) => v > 0);
-				if (rem.length !== 1 || rem[0][1] !== 2) return false;
-				const [k] = rem[0];
-				return k.startsWith('bamboo-') && GREEN_BAMBOO_RANKS.includes(parseInt(k.split('-')[1], 10));
-			}
-			for (let r = 1; r <= 9; r++) {
+function distanceImperialJade(counts, ctx, maxDistance) {
+	const base = cloneCounts(counts);
+	const dragonDeficit = takeSoft(base, 'dragon-green', 3);
+	function search(remaining, trial, soFar, chowUsed) {
+		if (soFar > maxDistance) return Infinity;
+		if (remaining === 0) return soFar + takeBestPairInPoolSoft(trial, GREEN_BAMBOO_RANKS.map((r) => `bamboo-${r}`));
+		let localBest = Infinity;
+		for (let r = 1; r <= 9; r++) {
+			const t2 = cloneCounts(trial);
+			const d = takeSoft(t2, `bamboo-${r}`, 3);
+			const total = search(remaining - 1, t2, soFar + d, chowUsed);
+			if (total < localBest) localBest = total;
+		}
+		if (!chowUsed) {
+			for (let r = 1; r <= 7; r++) {
 				const t2 = cloneCounts(trial);
-				if (take(t2, `bamboo-${r}`, 3) && search(remaining - 1, t2, chowUsed)) return true;
-			}
-			if (!chowUsed) {
-				for (let r = 1; r <= 7; r++) {
-					const t2 = cloneCounts(trial);
-					if (takeChow(t2, 'bamboo', r) && search(remaining - 1, t2, true)) return true;
-				}
-			}
-			return false;
-		}
-		if (search(3, base, false)) return true;
-	}
-	return false;
-}
-
-function matchLilyOfTheValley(counts) {
-	for (const gCount of [3, 4]) {
-		for (const wCount of [3, 4]) {
-			const base = cloneCounts(counts);
-			if (!take(base, 'dragon-green', gCount) || !take(base, 'dragon-white', wCount)) continue;
-			for (let r1 = 1; r1 <= 9; r1++) {
-				const t2 = cloneCounts(base);
-				if (!take(t2, `bamboo-${r1}`, 3)) continue;
-				for (let r2 = 1; r2 <= 9; r2++) {
-					const t3 = cloneCounts(t2);
-					if (!take(t3, `bamboo-${r2}`, 3)) continue;
-					const remaining = Object.entries(t3).filter(([, v]) => v > 0);
-					if (remaining.length === 1 && remaining[0][1] === 2) {
-						const rank = parseInt(remaining[0][0].split('-')[1], 10);
-						if (remaining[0][0].startsWith('bamboo-') && GREEN_BAMBOO_RANKS.includes(rank)) return true;
-					}
-				}
+				const d = takeChowSoft(t2, 'bamboo', r);
+				const total = search(remaining - 1, t2, soFar + d, true);
+				if (total < localBest) localBest = total;
 			}
 		}
+		return localBest;
 	}
-	return false;
+	return search(3, base, dragonDeficit, false);
 }
 
-function matchRedLily(counts) {
-	for (const rCount of [3, 4]) {
-		for (const wCount of [3, 4]) {
-			const base = cloneCounts(counts);
-			if (!take(base, 'dragon-red', rCount) || !take(base, 'dragon-white', wCount)) continue;
-			for (let r1 = 1; r1 <= 9; r1++) {
-				const t2 = cloneCounts(base);
-				if (!take(t2, `bamboo-${r1}`, 3)) continue;
-				for (let r2 = 1; r2 <= 9; r2++) {
-					const t3 = cloneCounts(t2);
-					if (!take(t3, `bamboo-${r2}`, 3)) continue;
-					const remaining = Object.entries(t3).filter(([, v]) => v > 0);
-					if (remaining.length === 1 && remaining[0][1] === 2) {
-						const rank = parseInt(remaining[0][0].split('-')[1], 10);
-						if (remaining[0][0].startsWith('bamboo-') && RED_BAMBOO_RANKS.includes(rank)) return true;
-					}
-				}
-			}
-		}
+function distanceLilyOfTheValley(counts) {
+	const allBambooRanks = Array.from({ length: 9 }, (_, i) => `bamboo-${i + 1}`);
+	let best = Infinity;
+	for (const pairKey of GREEN_BAMBOO_RANKS.map((r) => `bamboo-${r}`)) {
+		const trial = cloneCounts(counts);
+		let d = takeSoft(trial, 'dragon-green', 3) + takeSoft(trial, 'dragon-white', 3);
+		d += takeSoft(trial, pairKey, 2);
+		const pungKeys = allBambooRanks.filter((k) => k !== pairKey);
+		d += takeBestDistinctPungsInPoolSoft(trial, pungKeys, 2);
+		if (d < best) best = d;
 	}
-	return false;
+	return best;
 }
 
-function matchRoyalRuby(counts) {
-	for (const rCount of [3, 4]) {
-		const base = cloneCounts(counts);
-		if (!take(base, 'dragon-red', rCount)) continue;
-		function search(remaining, trial) {
-			if (remaining === 0) {
-				const rem = Object.entries(trial).filter(([, v]) => v > 0);
-				if (rem.length !== 1 || rem[0][1] !== 2) return false;
-				const [k] = rem[0];
-				return k.startsWith('bamboo-') && RED_BAMBOO_RANKS.includes(parseInt(k.split('-')[1], 10));
-			}
-			for (let r = 1; r <= 9; r++) {
-				const t2 = cloneCounts(trial);
-				if (take(t2, `bamboo-${r}`, 3) && search(remaining - 1, t2)) return true;
-			}
-			return false;
-		}
-		if (search(3, base)) return true;
+function distanceRedLily(counts) {
+	const allBambooRanks = Array.from({ length: 9 }, (_, i) => `bamboo-${i + 1}`);
+	let best = Infinity;
+	for (const pairKey of RED_BAMBOO_RANKS.map((r) => `bamboo-${r}`)) {
+		const trial = cloneCounts(counts);
+		let d = takeSoft(trial, 'dragon-red', 3) + takeSoft(trial, 'dragon-white', 3);
+		d += takeSoft(trial, pairKey, 2);
+		const pungKeys = allBambooRanks.filter((k) => k !== pairKey);
+		d += takeBestDistinctPungsInPoolSoft(trial, pungKeys, 2);
+		if (d < best) best = d;
 	}
-	return false;
+	return best;
 }
 
-function matchRubyJade(counts) {
-	for (const rCount of [3, 4]) {
-		for (const gCount of [3, 4]) {
-			const base = cloneCounts(counts);
-			if (!take(base, 'dragon-red', rCount) || !take(base, 'dragon-green', gCount)) continue;
-			for (let r1 = 1; r1 <= 9; r1++) {
-				const t2 = cloneCounts(base);
-				if (!take(t2, `bamboo-${r1}`, 3)) continue;
-				for (let r2 = 1; r2 <= 9; r2++) {
-					const t3 = cloneCounts(t2);
-					if (!take(t3, `bamboo-${r2}`, 3)) continue;
-					const remaining = Object.entries(t3).filter(([, v]) => v > 0);
-					if (remaining.length === 1 && remaining[0][1] === 2) {
-						const rank = parseInt(remaining[0][0].split('-')[1], 10);
-						if (remaining[0][0].startsWith('bamboo-') && (RED_BAMBOO_RANKS.includes(rank) || GREEN_BAMBOO_RANKS.includes(rank))) return true;
-					}
-				}
-			}
-		}
+function distanceRoyalRuby(counts) {
+	const allBambooRanks = Array.from({ length: 9 }, (_, i) => `bamboo-${i + 1}`);
+	let best = Infinity;
+	for (const pairKey of RED_BAMBOO_RANKS.map((r) => `bamboo-${r}`)) {
+		const trial = cloneCounts(counts);
+		let d = takeSoft(trial, 'dragon-red', 3);
+		d += takeSoft(trial, pairKey, 2);
+		const pungKeys = allBambooRanks.filter((k) => k !== pairKey);
+		d += takeBestDistinctPungsInPoolSoft(trial, pungKeys, 3);
+		if (d < best) best = d;
 	}
-	return false;
+	return best;
 }
 
-function matchLillypilly(counts) {
+function distanceRubyJade(counts) {
+	const allBambooRanks = Array.from({ length: 9 }, (_, i) => `bamboo-${i + 1}`);
+	const pairPool = [...RED_BAMBOO_RANKS, ...GREEN_BAMBOO_RANKS].map((r) => `bamboo-${r}`);
+	let best = Infinity;
+	for (const pairKey of pairPool) {
+		const trial = cloneCounts(counts);
+		let d = takeSoft(trial, 'dragon-red', 3) + takeSoft(trial, 'dragon-green', 3);
+		d += takeSoft(trial, pairKey, 2);
+		const pungKeys = allBambooRanks.filter((k) => k !== pairKey);
+		d += takeBestDistinctPungsInPoolSoft(trial, pungKeys, 2);
+		if (d < best) best = d;
+	}
+	return best;
+}
+
+function distanceLillypilly(counts) {
+	const allDotsRanks = Array.from({ length: 9 }, (_, i) => `dots-${i + 1}`);
 	const trial = cloneCounts(counts);
-	if (!take(trial, 'dragon-green', 3) || !take(trial, 'dragon-white', 2)) return false;
-	function search(remaining, t) {
-		if (remaining === 0) return remainingTotal(t) === 0;
-		for (let r = 1; r <= 9; r++) {
-			const t2 = cloneCounts(t);
-			if (take(t2, `dots-${r}`, 3) && search(remaining - 1, t2)) return true;
-		}
-		return false;
-	}
-	return search(3, trial);
+	let d = takeSoft(trial, 'dragon-green', 3) + takeSoft(trial, 'dragon-white', 2);
+	d += takeBestDistinctPungsInPoolSoft(trial, allDotsRanks, 3);
+	return d;
 }
 
-function matchBlueMountains(counts) {
-	const base = cloneCounts(counts);
-	if (!take(base, 'dragon-green', 3)) return false;
-	function search(remaining, trial) {
-		if (remaining === 0) {
-			const rem = Object.entries(trial).filter(([, v]) => v > 0);
-			if (rem.length !== 1 || rem[0][1] !== 2) return false;
-			const [k] = rem[0];
-			return k.startsWith('dots-') && BLUE_CIRCLE_RANKS.includes(parseInt(k.split('-')[1], 10));
-		}
-		for (let r = 1; r <= 9; r++) {
-			const t2 = cloneCounts(trial);
-			if (take(t2, `dots-${r}`, 3) && search(remaining - 1, t2)) return true;
-		}
-		return false;
+function distanceBlueMountains(counts) {
+	const allDotsRanks = Array.from({ length: 9 }, (_, i) => `dots-${i + 1}`);
+	let best = Infinity;
+	for (const pairKey of BLUE_CIRCLE_RANKS.map((r) => `dots-${r}`)) {
+		const trial = cloneCounts(counts);
+		let d = takeSoft(trial, 'dragon-green', 3);
+		d += takeSoft(trial, pairKey, 2);
+		const pungKeys = allDotsRanks.filter((k) => k !== pairKey);
+		d += takeBestDistinctPungsInPoolSoft(trial, pungKeys, 3);
+		if (d < best) best = d;
 	}
-	return search(3, base);
+	return best;
 }
 
-function matchWhiteElephant(counts) {
-	for (const wCount of [3, 4]) {
-		const base = cloneCounts(counts);
-		if (!take(base, 'dragon-white', wCount)) continue;
-		function search(remaining, trial) {
-			if (remaining === 0) {
-				const rem = Object.entries(trial).filter(([, v]) => v > 0);
-				if (rem.length !== 1 || rem[0][1] !== 2) return false;
-				const [k] = rem[0];
-				return k.startsWith('dots-') && EVEN_RANKS.includes(parseInt(k.split('-')[1], 10));
-			}
-			for (let r = 1; r <= 9; r++) {
-				const t2 = cloneCounts(trial);
-				if (take(t2, `dots-${r}`, 3) && search(remaining - 1, t2)) return true;
-			}
-			return false;
-		}
-		if (search(3, base)) return true;
+function distanceWhiteElephant(counts) {
+	const allDotsRanks = Array.from({ length: 9 }, (_, i) => `dots-${i + 1}`);
+	let best = Infinity;
+	for (const pairKey of EVEN_RANKS.map((r) => `dots-${r}`)) {
+		const trial = cloneCounts(counts);
+		let d = takeSoft(trial, 'dragon-white', 3);
+		d += takeSoft(trial, pairKey, 2);
+		const pungKeys = allDotsRanks.filter((k) => k !== pairKey);
+		d += takeBestDistinctPungsInPoolSoft(trial, pungKeys, 3);
+		if (d < best) best = d;
 	}
-	return false;
+	return best;
 }
 
-function matchDrivenSnow(counts) {
-	const base = cloneCounts(counts);
-	if (!take(base, 'dragon-white', 3)) return false;
-	function search(remaining, trial) {
-		if (remaining === 0) {
-			const rem = Object.entries(trial).filter(([, v]) => v > 0);
-			if (rem.length !== 1 || rem[0][1] !== 2) return false;
-			const [k] = rem[0];
-			return k.startsWith('characters-') && ODD_RANKS.includes(parseInt(k.split('-')[1], 10));
-		}
-		for (let r = 1; r <= 9; r++) {
-			const t2 = cloneCounts(trial);
-			if (take(t2, `characters-${r}`, 3) && search(remaining - 1, t2)) return true;
-		}
-		return false;
+function distanceDrivenSnow(counts) {
+	const allCharRanks = Array.from({ length: 9 }, (_, i) => `characters-${i + 1}`);
+	let best = Infinity;
+	for (const pairKey of ODD_RANKS.map((r) => `characters-${r}`)) {
+		const trial = cloneCounts(counts);
+		let d = takeSoft(trial, 'dragon-white', 3);
+		d += takeSoft(trial, pairKey, 2);
+		const pungKeys = allCharRanks.filter((k) => k !== pairKey);
+		d += takeBestDistinctPungsInPoolSoft(trial, pungKeys, 3);
+		if (d < best) best = d;
 	}
-	return search(3, base);
+	return best;
 }
 
-function matchDragonsScales(counts) {
-	const base = cloneCounts(counts);
-	if (!take(base, 'dragon-red', 3)) return false;
-	function search(remaining, trial) {
-		if (remaining === 0) {
-			const rem = Object.entries(trial).filter(([, v]) => v > 0);
-			if (rem.length !== 1 || rem[0][1] !== 2) return false;
-			const [k] = rem[0];
-			return k.startsWith('characters-') && EVEN_RANKS.includes(parseInt(k.split('-')[1], 10));
-		}
-		for (let r = 1; r <= 9; r++) {
-			const t2 = cloneCounts(trial);
-			if (take(t2, `characters-${r}`, 3) && search(remaining - 1, t2)) return true;
-		}
-		return false;
+function distanceDragonsScales(counts) {
+	const allCharRanks = Array.from({ length: 9 }, (_, i) => `characters-${i + 1}`);
+	let best = Infinity;
+	for (const pairKey of EVEN_RANKS.map((r) => `characters-${r}`)) {
+		const trial = cloneCounts(counts);
+		let d = takeSoft(trial, 'dragon-red', 3);
+		d += takeSoft(trial, pairKey, 2);
+		const pungKeys = allCharRanks.filter((k) => k !== pairKey);
+		d += takeBestDistinctPungsInPoolSoft(trial, pungKeys, 3);
+		if (d < best) best = d;
 	}
-	return search(3, base);
+	return best;
 }
 
-function matchDragonette(counts) {
+function distanceDragonette(counts) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		const trial = cloneCounts(counts);
-		if (!takeEachWind(trial)) continue;
-		if (!takeUniqueSetWithOnePaired(trial, DRAGON_RANKS.map((d) => `dragon-${d}`))) continue;
-		let pairs = 0;
-		let ok = true;
-		for (const [k, v] of Object.entries(trial)) {
-			if (v <= 0) continue;
-			if (!k.startsWith(`${suit}-`)) {
-				ok = false;
-				break;
-			}
-			const rank = parseInt(k.split('-')[1], 10);
-			if (rank === 1 || rank === 9 || v !== 2) {
-				ok = false;
-				break;
-			}
-			pairs++;
-		}
-		if (ok && pairs === 3) return true;
+		let d = takeEachWindSoft(trial);
+		d += takeUniqueSetWithOnePairedSoft(trial, DRAGON_RANKS.map((dr) => `dragon-${dr}`));
+		const nonTerminalKeys = Array.from({ length: 7 }, (_, i) => `${suit}-${i + 2}`);
+		d += takePairsFromPoolSoft(trial, nonTerminalKeys, 3);
+		if (d < best) best = d;
 	}
-	return false;
+	return best;
 }
 
-function matchDragonsRun(counts) {
+function distanceDragonsRun(counts) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		const base = cloneCounts(counts);
-		if (!takeRunRange(base, suit, 1, 9)) continue;
-		if (!takeEachDragon(base)) continue;
+		const d0 = takeRunRangeSoft(base, suit, 1, 9) + takeEachDragonSoft(base);
 		for (const w of WIND_RANKS) {
 			const t2 = cloneCounts(base);
-			if (take(t2, `wind-${w}`, 2) && remainingTotal(t2) === 0) return true;
+			const d = d0 + takeSoft(t2, `wind-${w}`, 2);
+			if (d < best) best = d;
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchSunrise(counts) {
+function distanceSunrise(counts) {
 	const base = cloneCounts(counts);
-	if (!take(base, 'wind-E', 3) || !take(base, 'dragon-white', 2)) return false;
-	for (const suit of SUITS_NUM) {
-		let placed = false;
-		for (let r = 2; r <= 8; r++) {
-			if (take(base, `${suit}-${r}`, 3)) {
-				placed = true;
-				break;
-			}
-		}
-		if (!placed) return false;
-	}
-	return remainingTotal(base) === 0;
+	let d = takeSoft(base, 'wind-E', 3) + takeSoft(base, 'dragon-white', 2);
+	for (const suit of SUITS_NUM) d += takeBestPungInSuitRangeSoft(base, suit, 2, 8);
+	return d;
 }
 
-function matchSunset(counts) {
+function distanceSunset(counts) {
 	const base = cloneCounts(counts);
-	if (!take(base, 'wind-W', 3) || !take(base, 'dragon-red', 2)) return false;
-	for (const suit of SUITS_NUM) {
-		let placed = false;
-		for (let r = 2; r <= 8; r++) {
-			if (take(base, `${suit}-${r}`, 3)) {
-				placed = true;
-				break;
-			}
-		}
-		if (!placed) return false;
-	}
-	return remainingTotal(base) === 0;
+	let d = takeSoft(base, 'wind-W', 3) + takeSoft(base, 'dragon-red', 2);
+	for (const suit of SUITS_NUM) d += takeBestPungInSuitRangeSoft(base, suit, 2, 8);
+	return d;
 }
 
-function matchNumbersInParallel(counts) {
+function distanceNumbersInParallel(counts) {
 	const honorKeys = [...WIND_RANKS.map((w) => `wind-${w}`), ...DRAGON_RANKS.map((d) => `dragon-${d}`)];
+	let best = Infinity;
 	for (const pungHonor of honorKeys) {
 		for (const pairHonor of honorKeys) {
 			if (pungHonor === pairHonor) continue;
 			const base = cloneCounts(counts);
-			if (!take(base, pungHonor, 3) || !take(base, pairHonor, 2)) continue;
+			const d0 = takeSoft(base, pungHonor, 3) + takeSoft(base, pairHonor, 2);
 			for (let r = 2; r <= 8; r++) {
 				const t2 = cloneCounts(base);
-				let ok = true;
-				for (const suit of SUITS_NUM) {
-					if (!take(t2, `${suit}-${r}`, 3)) {
-						ok = false;
-						break;
-					}
-				}
-				if (ok && remainingTotal(t2) === 0) return true;
+				let d = d0;
+				for (const suit of SUITS_NUM) d += takeSoft(t2, `${suit}-${r}`, 3);
+				if (d < best) best = d;
 			}
 		}
 	}
-	return false;
+	return best;
 }
 
 // Best-effort reading: "Two P/K of same number in two suits" is taken as two separate
-// number/suit-pair groups (four melds total), since the stated pieces alone don't add up
-// to 14 tiles otherwise.
-function matchNumbersDoubled(counts) {
+// number/suit-pair groups (four melds total), since the stated pieces alone don't add up to
+// 14 tiles otherwise.
+function distanceNumbersDoubled(counts) {
 	const honorKeys = [...WIND_RANKS.map((w) => `wind-${w}`), ...DRAGON_RANKS.map((d) => `dragon-${d}`)];
 	const suitPairs = [
 		[SUITS_NUM[0], SUITS_NUM[1]],
 		[SUITS_NUM[0], SUITS_NUM[2]],
 		[SUITS_NUM[1], SUITS_NUM[2]]
 	];
+	let best = Infinity;
 	for (const pairHonor of honorKeys) {
 		const base = cloneCounts(counts);
-		if (!take(base, pairHonor, 2)) continue;
+		const d0 = takeSoft(base, pairHonor, 2);
 		for (let rA = 2; rA <= 8; rA++) {
 			for (let rB = 2; rB <= 8; rB++) {
 				if (rA === rB) continue;
 				for (const [s1, s2] of suitPairs) {
 					for (const [s3, s4] of suitPairs) {
 						const t2 = cloneCounts(base);
-						if (
-							take(t2, `${s1}-${rA}`, 3) &&
-							take(t2, `${s2}-${rA}`, 3) &&
-							take(t2, `${s3}-${rB}`, 3) &&
-							take(t2, `${s4}-${rB}`, 3) &&
-							remainingTotal(t2) === 0
-						) {
-							return true;
-						}
+						const d =
+							d0 +
+							takeSoft(t2, `${s1}-${rA}`, 3) +
+							takeSoft(t2, `${s2}-${rA}`, 3) +
+							takeSoft(t2, `${s3}-${rB}`, 3) +
+							takeSoft(t2, `${s4}-${rB}`, 3);
+						if (d < best) best = d;
 					}
 				}
 			}
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchChineseOdds(counts) {
+function distanceChineseOdds(counts) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
-		function search(remaining, trial) {
-			if (remaining === 0) {
-				const rem = Object.entries(trial).filter(([, v]) => v > 0);
-				if (rem.length !== 1 || rem[0][1] !== 2) return false;
-				const [k] = rem[0];
-				return k.startsWith(`${suit}-`) && ODD_RANKS.includes(parseInt(k.split('-')[1], 10));
-			}
-			for (const r of ODD_RANKS) {
-				const t2 = cloneCounts(trial);
-				if (take(t2, `${suit}-${r}`, 3) && search(remaining - 1, t2)) return true;
-			}
-			return false;
+		const oddKeys = ODD_RANKS.map((r) => `${suit}-${r}`);
+		for (const pairKey of oddKeys) {
+			const trial = cloneCounts(counts);
+			const pairDeficit = takeSoft(trial, pairKey, 2);
+			const pungKeys = oddKeys.filter((k) => k !== pairKey);
+			const pungDeficit = takeBestDistinctPungsInPoolSoft(trial, pungKeys, 4);
+			const total = pairDeficit + pungDeficit;
+			if (total < best) best = total;
 		}
-		if (search(4, cloneCounts(counts))) return true;
 	}
-	return false;
+	return best;
 }
 
 // Seven Twins is All Pair's shape plus the "all tiles from wall inc. last" procedural
 // requirement — see the Chow Chow comment above for how that's checked.
-function matchSevenTwins(counts, ctx) {
-	if (!ctx.player || !ctx.player.melds.every((m) => m.concealed)) return false;
-	if (ctx.selfDraw === false || ctx.wonWithLastWallTile === false) return false;
-	return matchAllPair(counts);
+function distanceSevenTwins(counts, ctx) {
+	if (!ctx.player || !ctx.player.melds.every((m) => m.concealed)) return Infinity;
+	if (ctx.selfDraw === false || ctx.wonWithLastWallTile === false) return Infinity;
+	return distanceAllPair(counts);
 }
 
-function matchGoldenGates(counts) {
+function distanceGoldenGates(counts) {
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		const dragon = CORRESPONDING_DRAGON[suit];
 		const trial = cloneCounts(counts);
-		let ok = true;
-		for (const r of [2, 4, 6, 8]) {
-			if (!take(trial, `${suit}-${r}`, 2)) {
-				ok = false;
-				break;
-			}
-		}
-		if (!ok) continue;
+		let d0 = 0;
+		for (const r of [2, 4, 6, 8]) d0 += takeSoft(trial, `${suit}-${r}`, 2);
 		for (const terminal of [1, 9]) {
 			const t2 = cloneCounts(trial);
-			if (take(t2, `${suit}-${terminal}`, 3) && take(t2, `dragon-${dragon}`, 3) && remainingTotal(t2) === 0) return true;
+			const d = d0 + takeSoft(t2, `${suit}-${terminal}`, 3) + takeSoft(t2, `dragon-${dragon}`, 3);
+			if (d < best) best = d;
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchWindyDragons(counts) {
+function distanceWindyDragons(counts) {
 	const base = cloneCounts(counts);
-	for (const w of WIND_RANKS) if (!take(base, `wind-${w}`, 2)) return false;
+	let d0 = 0;
+	for (const w of WIND_RANKS) d0 += takeSoft(base, `wind-${w}`, 2);
+	let best = Infinity;
 	for (let i = 0; i < DRAGON_RANKS.length; i++) {
 		for (let j = i + 1; j < DRAGON_RANKS.length; j++) {
 			const t2 = cloneCounts(base);
-			if (take(t2, `dragon-${DRAGON_RANKS[i]}`, 3) && take(t2, `dragon-${DRAGON_RANKS[j]}`, 3) && remainingTotal(t2) === 0) return true;
+			const d = d0 + takeSoft(t2, `dragon-${DRAGON_RANKS[i]}`, 3) + takeSoft(t2, `dragon-${DRAGON_RANKS[j]}`, 3);
+			if (d < best) best = d;
 		}
 	}
-	return false;
+	return best;
 }
 
-function matchWindvane(counts) {
+function distanceWindvane(counts) {
 	const trial = cloneCounts(counts);
-	if (!takeUniqueSetWithOnePaired(trial, WIND_RANKS.map((w) => `wind-${w}`))) return false;
-	for (const suit of SUITS_NUM) {
-		let placed = false;
-		for (let r = 1; r <= 9; r++) {
-			if (take(trial, `${suit}-${r}`, 3)) {
-				placed = true;
-				break;
-			}
-		}
-		if (!placed) return false;
-	}
-	return remainingTotal(trial) === 0;
+	let d = takeUniqueSetWithOnePairedSoft(trial, WIND_RANKS.map((w) => `wind-${w}`));
+	for (const suit of SUITS_NUM) d += takeBestDistinctPungsInPoolSoft(trial, Array.from({ length: 9 }, (_, i) => `${suit}-${i + 1}`), 1);
+	return d;
 }
 
-function matchCivilWar(counts) {
+function distanceCivilWar(counts) {
+	let best = Infinity;
 	for (const suitA of SUITS_NUM) {
 		for (const suitB of SUITS_NUM) {
 			if (suitA === suitB) continue;
 			const trial = cloneCounts(counts);
-			if (
-				take(trial, 'wind-N', 3) &&
-				take(trial, 'wind-S', 3) &&
-				take(trial, `${suitA}-1`, 2) &&
-				take(trial, `${suitA}-8`, 1) &&
-				take(trial, `${suitA}-6`, 1) &&
-				take(trial, `${suitB}-1`, 1) &&
-				take(trial, `${suitB}-8`, 1) &&
-				take(trial, `${suitB}-6`, 1) &&
-				take(trial, `${suitB}-5`, 1) &&
-				remainingTotal(trial) === 0
-			) {
-				return true;
-			}
+			const d =
+				takeSoft(trial, 'wind-N', 3) +
+				takeSoft(trial, 'wind-S', 3) +
+				takeSoft(trial, `${suitA}-1`, 2) +
+				takeSoft(trial, `${suitA}-8`, 1) +
+				takeSoft(trial, `${suitA}-6`, 1) +
+				takeSoft(trial, `${suitB}-1`, 1) +
+				takeSoft(trial, `${suitB}-8`, 1) +
+				takeSoft(trial, `${suitB}-6`, 1) +
+				takeSoft(trial, `${suitB}-5`, 1);
+			if (d < best) best = d;
 		}
 	}
-	return false;
+	return best;
 }
 
 // Up You Go / Down You Go need the kong's literal 4th tile (their 14-tile shape isn't the
 // usual "4 melds + pair", so a kong here isn't just an interchangeable pung) — the general
 // tally caps every kong at 3, so once a real concealed kong is confirmed we restore the tile
-// the cap dropped before checking counts.
-function matchUpYouGo(counts, ctx) {
-	if (!ctx.player) return false;
+// the cap dropped before computing distance. Because a concealed kong must already be
+// declared (knowable now, not a future possibility), these only ever show up once that's
+// happened — same treatment as Chow Chow's concealment check above.
+function distanceUpYouGo(counts, ctx) {
+	if (!ctx.player) return Infinity;
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		const hasConcealedKong = ctx.player.melds.some((m) => m.type === 'kong' && m.concealed && m.tiles[0].suit === suit && m.tiles[0].rank === 8);
 		if (!hasConcealedKong) continue;
 		const trial = cloneCounts(counts);
 		trial[`${suit}-8`] = (trial[`${suit}-8`] || 0) + 1;
-		if (!takeEachWind(trial)) continue;
-		if (take(trial, `${suit}-2`, 1) && take(trial, `${suit}-4`, 2) && take(trial, `${suit}-6`, 3) && take(trial, `${suit}-8`, 4) && remainingTotal(trial) === 0) {
-			return true;
-		}
+		const d =
+			takeEachWindSoft(trial) +
+			takeSoft(trial, `${suit}-2`, 1) +
+			takeSoft(trial, `${suit}-4`, 2) +
+			takeSoft(trial, `${suit}-6`, 3) +
+			takeSoft(trial, `${suit}-8`, 4);
+		if (d < best) best = d;
 	}
-	return false;
+	return best;
 }
 
-function matchDownYouGo(counts, ctx) {
-	if (!ctx.player) return false;
+function distanceDownYouGo(counts, ctx) {
+	if (!ctx.player) return Infinity;
+	let best = Infinity;
 	for (const suit of SUITS_NUM) {
 		const hasConcealedKong = ctx.player.melds.some((m) => m.type === 'kong' && m.concealed && m.tiles[0].suit === suit && m.tiles[0].rank === 2);
 		if (!hasConcealedKong) continue;
 		const trial = cloneCounts(counts);
 		trial[`${suit}-2`] = (trial[`${suit}-2`] || 0) + 1;
-		if (!takeEachWind(trial)) continue;
-		if (take(trial, `${suit}-2`, 4) && take(trial, `${suit}-4`, 3) && take(trial, `${suit}-6`, 2) && take(trial, `${suit}-8`, 1) && remainingTotal(trial) === 0) {
-			return true;
-		}
+		const d =
+			takeEachWindSoft(trial) +
+			takeSoft(trial, `${suit}-2`, 4) +
+			takeSoft(trial, `${suit}-4`, 3) +
+			takeSoft(trial, `${suit}-6`, 2) +
+			takeSoft(trial, `${suit}-8`, 1);
+		if (d < best) best = d;
 	}
-	return false;
+	return best;
 }
 
-function matchRedWaratah(counts) {
+function distanceRedWaratah(counts) {
 	const base = cloneCounts(counts);
-	if (!take(base, 'dragon-red', 3) || !take(base, 'dragon-green', 2)) return false;
+	const d = takeSoft(base, 'dragon-red', 3) + takeSoft(base, 'dragon-green', 2);
+	let best = Infinity;
 	for (const redBambooRank of RED_BAMBOO_RANKS) {
 		const t2 = cloneCounts(base);
-		if (!take(t2, `bamboo-${redBambooRank}`, 3)) continue;
-		for (let cr = 1; cr <= 9; cr++) {
-			const t3 = cloneCounts(t2);
-			if (!take(t3, `dots-${cr}`, 3)) continue;
-			for (let hr = 1; hr <= 9; hr++) {
-				const t4 = cloneCounts(t3);
-				if (take(t4, `characters-${hr}`, 3) && remainingTotal(t4) === 0) return true;
-			}
-		}
+		const dBamboo = takeSoft(t2, `bamboo-${redBambooRank}`, 3);
+		const dDotsPung = takeBestDistinctPungsInPoolSoft(t2, Array.from({ length: 9 }, (_, i) => `dots-${i + 1}`), 1);
+		const dCharPung = takeBestDistinctPungsInPoolSoft(t2, Array.from({ length: 9 }, (_, i) => `characters-${i + 1}`), 1);
+		const total = d + dBamboo + dDotsPung + dCharPung;
+		if (total < best) best = total;
 	}
-	return false;
+	return best;
 }
 
-function matchAllWindsAndDragons(counts) {
+function distanceAllWindsAndDragons(counts) {
 	const honorKeys = [...WIND_RANKS.map((w) => `wind-${w}`), ...DRAGON_RANKS.map((d) => `dragon-${d}`)];
-	function search(remaining, trial, used) {
-		if (remaining === 0) {
-			const rem = Object.entries(trial).filter(([, v]) => v > 0);
-			if (rem.length !== 1 || rem[0][1] !== 2) return false;
-			return honorKeys.includes(rem[0][0]);
-		}
-		for (const key of honorKeys) {
-			if (used.has(key)) continue;
-			const t2 = cloneCounts(trial);
-			if (take(t2, key, 3) && search(remaining - 1, t2, new Set([...used, key]))) return true;
-		}
-		return false;
+	let best = Infinity;
+	for (const pairKey of honorKeys) {
+		const trial = cloneCounts(counts);
+		const pairDeficit = takeSoft(trial, pairKey, 2);
+		const pungKeys = honorKeys.filter((k) => k !== pairKey);
+		const pungDeficit = takeBestDistinctPungsInPoolSoft(trial, pungKeys, 4);
+		const total = pairDeficit + pungDeficit;
+		if (total < best) best = total;
 	}
-	return search(4, cloneCounts(counts), new Set());
+	return best;
 }
+
+const SPECIAL_HANDS = [
+	{ name: 'Wriggly Snake', winning: 1000, fishing: 400, distance: (c) => distanceWrigglySnake(c) },
+	{ name: 'Run, Pung & Pair', winning: 1000, fishing: 400, distance: (c) => distanceRunPungPair(c) },
+	{ name: "Greta's Garden", winning: 1000, fishing: 400, distance: (c) => distanceGretasGarden(c) },
+	{ name: "Greta's Dragon", winning: 1000, fishing: 400, distance: (c) => distanceGretasDragon(c) },
+	{ name: "Gertie's Garter", winning: 1000, fishing: 400, distance: (c) => distanceGertiesGarter(c) },
+	{ name: 'Red Lantern', winning: 2000, fishing: 800, distance: (c, ctx) => distanceRedLantern(c, ctx) },
+	{ name: 'Gates of Heaven', winning: 1000, fishing: 400, distance: (c) => distanceGatesOfHeaven(c) },
+	{ name: 'Confused Gates', winning: 1000, fishing: 400, distance: (c) => distanceConfusedGates(c) },
+	{ name: 'Windy Chow', winning: 500, fishing: 200, distance: (c) => distanceWindyChow(c) },
+	{ name: 'Big Robert', winning: 500, fishing: 200, distance: (c) => distanceBigRobert(c) },
+	{ name: 'Moon at Bottom of Well', winning: 1000, fishing: 400, distance: (c) => distanceMoonAtBottomOfWell(c) },
+	{ name: 'Knitting', winning: 500, fishing: 200, distance: (c) => distanceKnitting(c) },
+	{ name: 'Triple Knitting', winning: 500, fishing: 200, distance: (c) => distanceTripleKnitting(c) },
+	{ name: 'All Pair', winning: 500, fishing: 200, distance: (c) => distanceAllPair(c) },
+	{ name: 'All Pair Honours', winning: 1000, fishing: 400, distance: (c) => distanceAllPairHonours(c) },
+	{ name: 'Heavenly Twins', winning: 1000, fishing: 400, distance: (c) => distanceHeavenlyTwins(c) },
+	{ name: 'Windfall', winning: 1000, fishing: 400, distance: (c) => distanceWindfall(c) },
+	{ name: 'All Pair Ruby Jade', winning: 1000, fishing: 400, distance: (c) => distanceAllPairRubyJade(c) },
+	{ name: "Sparrow's Sanctuary", winning: 1500, fishing: 600, distance: (c) => distanceSparrowsSanctuary(c) },
+	{ name: 'Windy Ones', winning: 1000, fishing: 400, distance: (c) => distanceWindyRank(c, 1) },
+	{ name: 'Windy Nines', winning: 1000, fishing: 400, distance: (c) => distanceWindyRank(c, 9) },
+	{ name: 'Hachi Ban', winning: 1000, fishing: 400, distance: (c) => distanceHachiBan(c) },
+	{ name: 'Four Blessings', winning: 1500, fishing: 600, distance: (c) => distanceFourBlessings(c) },
+	{ name: 'Grand Sequence', winning: 1000, fishing: 400, distance: (c) => distanceGrandSequence(c) },
+	{ name: 'Dragonfly', winning: 1000, fishing: 400, distance: (c) => distanceDragonfly(c) },
+	{ name: "Dragon's Breath", winning: 1000, fishing: 400, distance: (c) => distanceDragonsBreath(c) },
+	{ name: 'Wriggly Dragon', winning: 1000, fishing: 400, distance: (c) => distanceWrigglyDragon(c) },
+	{ name: 'Green Jade', winning: 1000, fishing: 400, distance: (c) => distanceColorDragonSuitHand(c, 'green', 'bamboo') },
+	{ name: 'Red Coral', winning: 1000, fishing: 400, distance: (c) => distanceColorDragonSuitHand(c, 'red', 'characters') },
+	{ name: 'White Opal', winning: 1000, fishing: 400, distance: (c) => distanceColorDragonSuitHand(c, 'white', 'dots') },
+	{ name: 'Guardian Dragon', winning: 1000, fishing: 400, distance: (c) => distanceGuardianDragon(c) },
+	{ name: 'Three Great Scholars', winning: 1500, fishing: 600, distance: (c) => distanceThreeGreatScholars(c) },
+	{ name: 'Unique Wonder', winning: 2000, fishing: 800, distance: (c) => distanceUniqueWonder(c) },
+	{ name: 'Five Odd Honours', winning: 500, fishing: 200, distance: (c) => distanceFiveOddHonours(c) },
+	{ name: "Dragon's Tail", winning: 1000, fishing: 400, distance: (c) => distanceDragonsTail(c) },
+	{ name: 'Hovering Angel', winning: 1000, fishing: 400, distance: (c, ctx) => distanceHoveringAngel(c, ctx) }
+];
 
 const FULL_SPECIAL_HANDS = [
 	...SPECIAL_HANDS,
-	{ name: 'Guardian Winds', winning: 1000, fishing: 400, matches: (c) => matchGuardianWinds(c) },
-	{ name: "Dragon's Gates", winning: 1000, fishing: 400, matches: (c) => matchDragonsGates(c) },
-	{ name: "Dragon's Teeth", winning: 1000, fishing: 400, matches: (c) => matchDragonsTeeth(c) },
-	{ name: 'Yin Yang', winning: 1000, fishing: 400, matches: (c) => matchYinYang(c) },
-	{ name: 'Three Philosophers', winning: 1000, fishing: 400, matches: (c) => matchThreePhilosophers(c) },
+	{ name: 'Guardian Winds', winning: 1000, fishing: 400, distance: (c) => distanceGuardianWinds(c) },
+	{ name: "Dragon's Gates", winning: 1000, fishing: 400, distance: (c) => distanceDragonsGates(c) },
+	{ name: "Dragon's Teeth", winning: 1000, fishing: 400, distance: (c) => distanceDragonsTeeth(c) },
+	{ name: 'Yin Yang', winning: 1000, fishing: 400, distance: (c) => distanceYinYang(c) },
+	{ name: 'Three Philosophers', winning: 1000, fishing: 400, distance: (c) => distanceThreePhilosophers(c) },
 	// Chow Chow's shape is a stricter (all-one-suit, procedural) subset of Crazy Chows at the
 	// same score, so it's listed first to win the display-name tie when both match.
-	{ name: 'Chow Chow', winning: 500, fishing: 200, matches: (c, ctx) => matchChowChow(c, ctx) },
-	{ name: 'Crazy Chows', winning: 500, fishing: 200, matches: (c) => matchCrazyChows(c) },
-	{ name: 'Little Robert', winning: 500, fishing: 200, matches: (c) => matchLittleRobert(c) },
-	{ name: 'Chop Suey', winning: 1000, fishing: 400, matches: (c) => matchChopSuey(c) },
-	{ name: 'Chow Mien', winning: 1000, fishing: 400, matches: (c) => matchChowMien(c) },
-	{ name: 'Little Brother', winning: 500, fishing: 200, matches: (c, ctx) => matchLittleBrother(c, ctx) },
-	{ name: 'Apple Blossom', winning: 1000, fishing: 400, matches: (c) => matchAppleBlossom(c) },
-	{ name: 'The Professors', winning: 500, fishing: 200, matches: (c, ctx) => matchTheProfessors(c, ctx) },
-	{ name: 'Odds & Evens', winning: 1500, fishing: 600, matches: (c) => matchOddsAndEvens(c) },
-	{ name: 'Heads and Tails', winning: 1000, fishing: 400, matches: (c) => matchHeadsAndTails(c) },
-	{ name: 'Robin', winning: 500, fishing: 200, matches: (c) => matchRobin(c) },
-	{ name: 'All Pair Jade', winning: 1000, fishing: 400, matches: (c) => matchAllPairJade(c) },
-	{ name: 'Imperial Jade', winning: 2000, fishing: 800, matches: (c) => matchImperialJade(c) },
-	{ name: 'Lily of the Valley', winning: 2000, fishing: 800, matches: (c) => matchLilyOfTheValley(c) },
-	{ name: 'Red Lily', winning: 2000, fishing: 800, matches: (c) => matchRedLily(c) },
-	{ name: 'Royal Ruby', winning: 2000, fishing: 800, matches: (c) => matchRoyalRuby(c) },
-	{ name: 'Ruby Jade', winning: 1000, fishing: 400, matches: (c) => matchRubyJade(c) },
-	{ name: 'Lillypilly', winning: 1000, fishing: 400, matches: (c) => matchLillypilly(c) },
-	{ name: 'Blue Mountains', winning: 1000, fishing: 400, matches: (c) => matchBlueMountains(c) },
-	{ name: 'White Elephant', winning: 1000, fishing: 400, matches: (c) => matchWhiteElephant(c) },
-	{ name: 'Driven Snow', winning: 1000, fishing: 400, matches: (c) => matchDrivenSnow(c) },
-	{ name: "Dragon's Scales", winning: 1000, fishing: 400, matches: (c) => matchDragonsScales(c) },
-	{ name: 'Dragonette', winning: 1000, fishing: 400, matches: (c) => matchDragonette(c) },
-	{ name: "Dragon's Run", winning: 1500, fishing: 600, matches: (c) => matchDragonsRun(c) },
-	{ name: 'Sunrise', winning: 1000, fishing: 400, matches: (c) => matchSunrise(c) },
-	{ name: 'Sunset', winning: 1000, fishing: 400, matches: (c) => matchSunset(c) },
-	{ name: 'Numbers in Parallel', winning: 1500, fishing: 600, matches: (c) => matchNumbersInParallel(c) },
-	{ name: 'Numbers Doubled', winning: 1500, fishing: 600, matches: (c) => matchNumbersDoubled(c) },
-	{ name: 'Chinese Odds', winning: 1500, fishing: 600, matches: (c) => matchChineseOdds(c) },
-	{ name: 'Seven Twins', winning: 500, fishing: 200, matches: (c, ctx) => matchSevenTwins(c, ctx) },
-	{ name: 'Golden Gates', winning: 1000, fishing: 400, matches: (c) => matchGoldenGates(c) },
-	{ name: 'Windy Dragons', winning: 1000, fishing: 400, matches: (c) => matchWindyDragons(c) },
-	{ name: 'Windvane', winning: 1000, fishing: 400, matches: (c) => matchWindvane(c) },
-	{ name: 'Three Sisters', winning: 1000, fishing: 400, matches: (c) => matchWindyRank(c, 3) },
-	{ name: 'Seven Brothers', winning: 1000, fishing: 400, matches: (c) => matchWindyRank(c, 7) },
-	{ name: 'Civil War', winning: 1500, fishing: 600, matches: (c) => matchCivilWar(c) },
-	{ name: 'Up You Go', winning: 2000, fishing: 800, matches: (c, ctx) => matchUpYouGo(c, ctx) },
-	{ name: 'Down You Go', winning: 2000, fishing: 800, matches: (c, ctx) => matchDownYouGo(c, ctx) },
-	{ name: 'Red Waratah', winning: 1000, fishing: 400, matches: (c) => matchRedWaratah(c) },
-	{ name: 'All Winds and Dragons', winning: 1000, fishing: 400, matches: (c) => matchAllWindsAndDragons(c) }
+	{ name: 'Chow Chow', winning: 500, fishing: 200, distance: (c, ctx, max) => distanceChowChow(c, ctx, max) },
+	{ name: 'Crazy Chows', winning: 500, fishing: 200, distance: (c, ctx, max) => distanceCrazyChows(c, ctx, max) },
+	{ name: 'Little Robert', winning: 500, fishing: 200, distance: (c) => distanceLittleRobert(c) },
+	{ name: 'Chop Suey', winning: 1000, fishing: 400, distance: (c) => distanceChopSuey(c) },
+	{ name: 'Chow Mien', winning: 1000, fishing: 400, distance: (c) => distanceChowMien(c) },
+	{ name: 'Little Brother', winning: 500, fishing: 200, distance: (c, ctx) => distanceLittleBrother(c, ctx) },
+	{ name: 'Apple Blossom', winning: 1000, fishing: 400, distance: (c, ctx, max) => distanceAppleBlossom(c, ctx, max) },
+	{ name: 'The Professors', winning: 500, fishing: 200, distance: (c, ctx, max) => distanceTheProfessors(c, ctx, max) },
+	{ name: 'Odds & Evens', winning: 1500, fishing: 600, distance: (c) => distanceOddsAndEvens(c) },
+	{ name: 'Heads and Tails', winning: 1000, fishing: 400, distance: (c) => distanceHeadsAndTails(c) },
+	{ name: 'Robin', winning: 500, fishing: 200, distance: (c) => distanceRobin(c) },
+	{ name: 'All Pair Jade', winning: 1000, fishing: 400, distance: (c) => distanceAllPairJade(c) },
+	{ name: 'Imperial Jade', winning: 2000, fishing: 800, distance: (c, ctx, max) => distanceImperialJade(c, ctx, max) },
+	{ name: 'Lily of the Valley', winning: 2000, fishing: 800, distance: (c) => distanceLilyOfTheValley(c) },
+	{ name: 'Red Lily', winning: 2000, fishing: 800, distance: (c) => distanceRedLily(c) },
+	{ name: 'Royal Ruby', winning: 2000, fishing: 800, distance: (c) => distanceRoyalRuby(c) },
+	{ name: 'Ruby Jade', winning: 1000, fishing: 400, distance: (c) => distanceRubyJade(c) },
+	{ name: 'Lillypilly', winning: 1000, fishing: 400, distance: (c) => distanceLillypilly(c) },
+	{ name: 'Blue Mountains', winning: 1000, fishing: 400, distance: (c) => distanceBlueMountains(c) },
+	{ name: 'White Elephant', winning: 1000, fishing: 400, distance: (c) => distanceWhiteElephant(c) },
+	{ name: 'Driven Snow', winning: 1000, fishing: 400, distance: (c) => distanceDrivenSnow(c) },
+	{ name: "Dragon's Scales", winning: 1000, fishing: 400, distance: (c) => distanceDragonsScales(c) },
+	{ name: 'Dragonette', winning: 1000, fishing: 400, distance: (c) => distanceDragonette(c) },
+	{ name: "Dragon's Run", winning: 1500, fishing: 600, distance: (c) => distanceDragonsRun(c) },
+	{ name: 'Sunrise', winning: 1000, fishing: 400, distance: (c) => distanceSunrise(c) },
+	{ name: 'Sunset', winning: 1000, fishing: 400, distance: (c) => distanceSunset(c) },
+	{ name: 'Numbers in Parallel', winning: 1500, fishing: 600, distance: (c) => distanceNumbersInParallel(c) },
+	{ name: 'Numbers Doubled', winning: 1500, fishing: 600, distance: (c) => distanceNumbersDoubled(c) },
+	{ name: 'Chinese Odds', winning: 1500, fishing: 600, distance: (c) => distanceChineseOdds(c) },
+	{ name: 'Seven Twins', winning: 500, fishing: 200, distance: (c, ctx) => distanceSevenTwins(c, ctx) },
+	{ name: 'Golden Gates', winning: 1000, fishing: 400, distance: (c) => distanceGoldenGates(c) },
+	{ name: 'Windy Dragons', winning: 1000, fishing: 400, distance: (c) => distanceWindyDragons(c) },
+	{ name: 'Windvane', winning: 1000, fishing: 400, distance: (c) => distanceWindvane(c) },
+	{ name: 'Three Sisters', winning: 1000, fishing: 400, distance: (c) => distanceWindyRank(c, 3) },
+	{ name: 'Seven Brothers', winning: 1000, fishing: 400, distance: (c) => distanceWindyRank(c, 7) },
+	{ name: 'Civil War', winning: 1500, fishing: 600, distance: (c) => distanceCivilWar(c) },
+	{ name: 'Up You Go', winning: 2000, fishing: 800, distance: (c, ctx) => distanceUpYouGo(c, ctx) },
+	{ name: 'Down You Go', winning: 2000, fishing: 800, distance: (c, ctx) => distanceDownYouGo(c, ctx) },
+	{ name: 'Red Waratah', winning: 1000, fishing: 400, distance: (c) => distanceRedWaratah(c) },
+	{ name: 'All Winds and Dragons', winning: 1000, fishing: 400, distance: (c) => distanceAllWindsAndDragons(c) }
 ];
 
 // Normalizes a player's tiles (concealed hand + revealed meld tiles, kongs capped at 3
@@ -1874,22 +1836,26 @@ function handsListFor(handMode) {
 	return handMode === 'fullList' ? FULL_SPECIAL_HANDS : SPECIAL_HANDS;
 }
 
+// The default cap for recursive hands' branch-and-bound pruning when a caller doesn't need
+// anything beyond "is this hand complete" (distance 0) or a specific small maxDistance.
+const DEFAULT_MAX_DISTANCE = 8;
+
+function handDistance(hand, tally, ctx, maxDistance) {
+	return hand.distance(cloneCounts(tally), ctx, maxDistance ?? DEFAULT_MAX_DISTANCE);
+}
+
 function bestSpecialHandMatch(tally, ctx, handsList) {
 	let best = null;
 	for (const hand of handsList) {
-		if (hand.matches(cloneCounts(tally), ctx) && (!best || hand.winning > best.winning)) best = hand;
+		if (handDistance(hand, tally, ctx, 0) === 0 && (!best || hand.winning > best.winning)) best = hand;
 	}
 	return best;
 }
 
 function bestSpecialHandFishingMatch(partialTally, ctx, handsList) {
 	let best = null;
-	for (const probe of ALL_TILE_KINDS) {
-		const key = `${probe.suit}-${probe.rank}`;
-		const trial = cloneCounts(partialTally);
-		trial[key] = (trial[key] || 0) + 1;
-		const match = bestSpecialHandMatch(trial, ctx, handsList);
-		if (match && (!best || match.fishing > best.fishing)) best = match;
+	for (const hand of handsList) {
+		if (handDistance(hand, partialTally, ctx, 1) === 1 && (!best || hand.fishing > best.fishing)) best = hand;
 	}
 	return best;
 }
@@ -1925,29 +1891,34 @@ function applySpecialFishingScore(player, ordinaryResult, handMode) {
 	return ordinaryResult;
 }
 
-const MAX_NAMED_HAND_FISHING_RESULTS = 8;
+const MAX_NAMED_HAND_RESULTS = 8;
 
-// For the Learning-mode hint: every named hand this player is exactly one tile away
-// from right now, with which specific tile(s) would complete it. Cheap (checks each
-// hand against each of the 34 tile kinds — no partial-progress search), so it only
-// ever answers "how close is 1 tile", not "how close is 2 or 3 tiles".
-function namedHandFishingOptions(player, handMode) {
+// For the Learning-mode hint: every named hand this player is within `maxDistance` tiles of
+// right now, sorted closest-first (ties broken by higher Winning score). For hands exactly
+// one tile away, also lists which specific tile(s) would complete it and how many are still
+// unseen — for anything further away, exact tile suggestions would be combinatorially messy,
+// so only the distance is reported.
+function namedHandDistances(player, handMode, maxDistance = 3) {
 	if (handMode === 'beginner') return [];
 	const tally = specialHandTally(player, null);
 	const ctx = { seatWind: player.seatWind, player };
 	const results = [];
 	for (const hand of handsListFor(handMode)) {
-		const waits = [];
-		for (const probe of ALL_TILE_KINDS) {
-			const trial = cloneCounts(tally);
-			const key = `${probe.suit}-${probe.rank}`;
-			trial[key] = (trial[key] || 0) + 1;
-			if (hand.matches(trial, ctx)) waits.push({ suit: probe.suit, rank: probe.rank });
+		const distance = handDistance(hand, tally, ctx, maxDistance);
+		if (distance > maxDistance) continue;
+		const entry = { name: hand.name, winning: hand.winning, fishing: hand.fishing, distance, waits: [] };
+		if (distance === 1) {
+			for (const probe of ALL_TILE_KINDS) {
+				const trial = cloneCounts(tally);
+				const key = `${probe.suit}-${probe.rank}`;
+				trial[key] = (trial[key] || 0) + 1;
+				if (hand.distance(trial, ctx, 0) === 0) entry.waits.push({ suit: probe.suit, rank: probe.rank });
+			}
 		}
-		if (waits.length > 0) results.push({ name: hand.name, winning: hand.winning, fishing: hand.fishing, waits });
+		results.push(entry);
 	}
-	results.sort((a, b) => b.winning - a.winning);
-	return results.slice(0, MAX_NAMED_HAND_FISHING_RESULTS);
+	results.sort((a, b) => a.distance - b.distance || b.winning - a.winning);
+	return results.slice(0, MAX_NAMED_HAND_RESULTS);
 }
 
 function findTileInHand(hand, suit, rank) {
@@ -2119,7 +2090,7 @@ function getStateForPlayer(game, playerId) {
 		myOriginalCallEligible: player.originalCallEligible,
 		myOriginalCallActive: player.originalCallActive,
 		myNamedHandFishing:
-			game.status === 'playing' && player.assistMode === 'learning' ? namedHandFishingOptions(player, game.handMode) : [],
+			game.status === 'playing' && player.assistMode === 'learning' ? namedHandDistances(player, game.handMode, 3) : [],
 		availableConcealedKongs:
 			isMyTurn && game.turnPhase === 'awaitingDiscard' ? getConcealedKongOptions(player) : [],
 		availablePromotedKongs:
