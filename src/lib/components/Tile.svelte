@@ -14,7 +14,7 @@
 		tile: Tile;
 		selected?: boolean;
 		highlight?: boolean;
-		underlines?: { row: number; type: UnderlineType; extendRight: boolean }[];
+		underlines?: { row: number; type: UnderlineType; optimal: boolean; extendRight: boolean }[];
 		small?: boolean;
 		onclick?: () => void;
 	} = $props();
@@ -28,6 +28,14 @@
 		set: 'bg-emerald-500',
 		pair: 'bg-purple-500',
 		taatsu: 'bg-sky-400'
+	};
+	// Non-optimal (near-miss) groups render as a dashed line of the same color
+	// instead of a solid fill, so a completed set that isn't part of the
+	// shortest path still shows up, just visibly marked as "not the best".
+	const UNDERLINE_BORDER_COLOR: Record<UnderlineType, string> = {
+		set: 'border-emerald-500',
+		pair: 'border-purple-500',
+		taatsu: 'border-sky-400'
 	};
 
 	// The parent lays tiles out with `gap-1` (4px); extending a bridged bar by
@@ -61,10 +69,17 @@
 	{#if rowCount > 0}
 		<div class="flex flex-col gap-0.5 mt-0.5 w-full">
 			{#each rows as entry}
-				<div
-					class="h-[3px] {entry ? UNDERLINE_COLOR[entry.type] : 'bg-transparent'}"
-					style={entry?.extendRight ? `width: calc(100% + ${GAP_PX}px);` : ''}
-				></div>
+				{#if entry && !entry.optimal}
+					<div
+						class="h-[3px] border-t-2 border-dashed {UNDERLINE_BORDER_COLOR[entry.type]}"
+						style={entry.extendRight ? `width: calc(100% + ${GAP_PX}px);` : ''}
+					></div>
+				{:else}
+					<div
+						class="h-[3px] {entry ? UNDERLINE_COLOR[entry.type] : 'bg-transparent'}"
+						style={entry?.extendRight ? `width: calc(100% + ${GAP_PX}px);` : ''}
+					></div>
+				{/if}
 			{/each}
 		</div>
 	{/if}

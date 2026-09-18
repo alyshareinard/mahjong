@@ -138,9 +138,11 @@ function findWinCandidates(concealedTiles, meldsNeeded) {
 // Every hand (winning or not) is scored on its own pungs/kongs/pairs, doubled for
 // certain conditions, capped at LIMIT. The winner then collects their full score
 // from each opponent; non-winners settle the difference between their own scores.
-// East Wind always pays and receives double. "Fishing"/calling-hand bonuses,
-// robbing-the-kong, and the ~150-hand named-pattern list are intentionally not
-// implemented yet — see conversation history for why.
+// East Wind always pays and receives double. The book's named hands (a beginner-friendly
+// "Short List" of ~35, or the "Full List" of ~80 from the book's full synopsis) are layered
+// on top per-room (see below) and can override this with a fixed score. General
+// "fishing"/calling-hand declarations outside of named hands, and robbing-the-kong, are
+// intentionally not implemented yet.
 
 function isMajorTile(tile) {
 	if (tile.suit === 'wind' || tile.suit === 'dragon') return true;
@@ -277,6 +279,7 @@ function computeHandScore(game, player, opts) {
 		if (melds.every((m) => m.concealed)) addDouble('Fully concealed hand');
 		if (wonWithLastWallTile) addDouble('Won with last tile from wall');
 		if (wonWithFinalDiscard) addDouble('Won with final discard');
+		if (player.originalCallActive) addDouble('Original call');
 	}
 
 	const rawScore = Math.round(basic * Math.pow(2, doubles));
@@ -351,6 +354,21 @@ function findAllOrdinaryWinShapes(player, extraTile) {
 	}));
 }
 
+const ALL_TILE_KINDS = [
+	...SUITS_NUM.flatMap((suit) => Array.from({ length: 9 }, (_, i) => ({ suit, rank: i + 1 }))),
+	...WIND_RANKS.map((rank) => ({ suit: 'wind', rank })),
+	...DRAGON_RANKS.map((rank) => ({ suit: 'dragon', rank }))
+];
+
+// Is this player one tile away from a complete hand (a "calling"/tenpai hand)?
+// Used to gate the Original Call declaration, which requires the hand to
+// already be calling right after the player's first discard.
+function isCallingHand(player) {
+	const meldsNeeded = 4 - player.melds.length;
+	if (player.hand.length !== meldsNeeded * 3 + 1) return false;
+	return ALL_TILE_KINDS.some((probe) => findAllOrdinaryWinShapes(player, { id: 'probe', ...probe }).length > 0);
+}
+
 function bestOrdinaryWinScore(game, player, extraTile, scoreContext) {
 	const shapes = findAllOrdinaryWinShapes(player, extraTile);
 	if (shapes.length === 0) return null;
@@ -365,6 +383,1546 @@ function bestOrdinaryWinScore(game, player, extraTile, scoreContext) {
 		if (!best || result.rawScore > best.rawScore) best = result;
 	}
 	return best;
+}
+
+// ---------- named special hands (The Mah Jong Player's Companion "Short List", pp.6-7) ----------
+// These ~25 hands have their own flat Winning/Fishing scores that bypass the normal
+// basic-score-times-doubles calculation (and can exceed the normal LIMIT). Each hand's
+// `matches(counts, ctx)` gets a tally of the player's full 14-tile-equivalent hand
+// (concealed tiles + meld tiles, with kongs capped at 3 tiles so they behave like pungs)
+// and must fully account for every tile with nothing left over. A player's final score is
+// the higher of the ordinary calculation and the best matching named hand (Winning for a
+// complete hand, Fishing for a non-winner who is exactly one tile away from one at hand-end).
+// Big Robert (marked below) is still a best-effort reading pending a closer look at the
+// book's page 14 — everything else has been confirmed against the full page text.
+
+const RED_BAMBOO_RANKS = [1, 5, 7, 9];
+const GREEN_BAMBOO_RANKS = [2, 3, 4, 6, 8];
+
+function take(counts, key, n) {
+	if ((counts[key] || 0) < n) return false;
+	counts[key] -= n;
+	return true;
+}
+
+function remainingTotal(counts) {
+	return Object.values(counts).reduce((a, b) => a + b, 0);
+}
+
+function takeRunRange(counts, suit, lo, hi) {
+	for (let r = lo; r <= hi; r++) if (!take(counts, `${suit}-${r}`, 1)) return false;
+	return true;
+}
+
+function takeEachWind(counts) {
+	for (const w of WIND_RANKS) if (!take(counts, `wind-${w}`, 1)) return false;
+	return true;
+}
+
+function takeEachDragon(counts) {
+	for (const d of DRAGON_RANKS) if (!take(counts, `dragon-${d}`, 1)) return false;
+	return true;
+}
+
+// Consumes exactly one of each key in `keys`, except one (tried across every option) which
+// is consumed twice — the "any tile paired" construction used throughout the short list.
+function takeUniqueSetWithOnePaired(counts, keys) {
+	for (const doubled of keys) {
+		const trial = cloneCounts(counts);
+		let ok = true;
+		for (const k of keys) {
+			if (!take(trial, k, k === doubled ? 2 : 1)) {
+				ok = false;
+				break;
+			}
+		}
+		if (ok) {
+			Object.assign(counts, trial);
+			return true;
+		}
+	}
+	return false;
+}
+
+// True if every remaining tile belongs to `suit` and decomposes into exactly `pairCount` pairs.
+function isExactPairsInSuit(counts, suit, pairCount) {
+	let total = 0;
+	for (const [k, v] of Object.entries(counts)) {
+		if (v <= 0) continue;
+		if (!k.startsWith(`${suit}-`)) return false;
+		if (v % 2 !== 0) return false;
+		total += v;
+	}
+	return total === pairCount * 2;
+}
+
+function takeChow(counts, suit, startRank) {
+	return take(counts, `${suit}-${startRank}`, 1) && take(counts, `${suit}-${startRank + 1}`, 1) && take(counts, `${suit}-${startRank + 2}`, 1);
+}
+
+// takeChow is a chained take() of 3 tiles: on a partial match (e.g. rank present, rank+1
+// present, rank+2 missing) it still consumes the first two before failing. Retrying different
+// start ranks against the *same* mutable object is therefore unsafe — this tries each start on
+// a fresh clone and only commits (mutating `counts`, like `take`) on an actual full match.
+function takeAnyChow(counts, suit, loRank = 1, hiRank = 7) {
+	for (let r = loRank; r <= hiRank; r++) {
+		const trial = cloneCounts(counts);
+		if (takeChow(trial, suit, r)) {
+			Object.assign(counts, trial);
+			return true;
+		}
+	}
+	return false;
+}
+
+function matchWrigglySnake(counts) {
+	for (const suit of SUITS_NUM) {
+		const trial = cloneCounts(counts);
+		const keys = [...Array.from({ length: 9 }, (_, i) => `${suit}-${i + 1}`), ...WIND_RANKS.map((w) => `wind-${w}`)];
+		if (takeUniqueSetWithOnePaired(trial, keys) && remainingTotal(trial) === 0) return true;
+	}
+	return false;
+}
+
+function matchRunPungPair(counts) {
+	for (const suit of SUITS_NUM) {
+		const trial = cloneCounts(counts);
+		if (!takeRunRange(trial, suit, 1, 9)) continue;
+		for (let pungRank = 1; pungRank <= 9; pungRank++) {
+			const t2 = cloneCounts(trial);
+			if (!take(t2, `${suit}-${pungRank}`, 3)) continue;
+			for (let pairRank = 1; pairRank <= 9; pairRank++) {
+				const t3 = cloneCounts(t2);
+				if (take(t3, `${suit}-${pairRank}`, 2) && remainingTotal(t3) === 0) return true;
+			}
+		}
+	}
+	return false;
+}
+
+function matchGretasGarden(counts) {
+	for (const suit of SUITS_NUM) {
+		const trial = cloneCounts(counts);
+		if (takeRunRange(trial, suit, 1, 7) && takeEachWind(trial) && takeEachDragon(trial) && remainingTotal(trial) === 0) return true;
+	}
+	return false;
+}
+
+function matchGretasDragon(counts) {
+	for (const suit of SUITS_NUM) {
+		for (const d of DRAGON_RANKS) {
+			const trial = cloneCounts(counts);
+			if (takeRunRange(trial, suit, 1, 7) && takeEachWind(trial) && take(trial, `dragon-${d}`, 3) && remainingTotal(trial) === 0) return true;
+		}
+	}
+	return false;
+}
+
+function matchGertiesGarter(counts) {
+	for (const suitA of SUITS_NUM) {
+		for (const suitB of SUITS_NUM) {
+			if (suitA === suitB) continue;
+			const trial = cloneCounts(counts);
+			if (takeRunRange(trial, suitA, 1, 7) && takeRunRange(trial, suitB, 1, 7) && remainingTotal(trial) === 0) return true;
+		}
+	}
+	return false;
+}
+
+function matchRedLantern(counts, ctx) {
+	for (const suit of SUITS_NUM) {
+		const trial = cloneCounts(counts);
+		const keys = Array.from({ length: 7 }, (_, i) => `${suit}-${i + 1}`);
+		if (!takeUniqueSetWithOnePaired(trial, keys)) continue;
+		if (take(trial, `wind-${ctx.seatWind}`, 3) && take(trial, 'dragon-red', 3) && remainingTotal(trial) === 0) return true;
+	}
+	return false;
+}
+
+function matchGatesOfHeaven(counts) {
+	for (const suit of SUITS_NUM) {
+		const trial = cloneCounts(counts);
+		const keys = Array.from({ length: 7 }, (_, i) => `${suit}-${i + 2}`);
+		if (!takeUniqueSetWithOnePaired(trial, keys)) continue;
+		if (take(trial, `${suit}-1`, 3) && take(trial, `${suit}-9`, 3) && remainingTotal(trial) === 0) return true;
+	}
+	return false;
+}
+
+function matchConfusedGates(counts) {
+	for (const suitRun of SUITS_NUM) {
+		for (const suit1 of SUITS_NUM) {
+			if (suit1 === suitRun) continue;
+			for (const suit9 of SUITS_NUM) {
+				if (suit9 === suitRun || suit9 === suit1) continue;
+				const trial = cloneCounts(counts);
+				const keys = Array.from({ length: 7 }, (_, i) => `${suitRun}-${i + 2}`);
+				if (!takeUniqueSetWithOnePaired(trial, keys)) continue;
+				if (take(trial, `${suit1}-1`, 3) && take(trial, `${suit9}-9`, 3) && remainingTotal(trial) === 0) return true;
+			}
+		}
+	}
+	return false;
+}
+
+function matchWindyChow(counts) {
+	const trial = cloneCounts(counts);
+	for (const suit of SUITS_NUM) {
+		if (!takeAnyChow(trial, suit)) return false;
+	}
+	const keys = WIND_RANKS.map((w) => `wind-${w}`);
+	return takeUniqueSetWithOnePaired(trial, keys) && remainingTotal(trial) === 0;
+}
+
+// Windy Ones/Nines: the short list doesn't spell out "any Wind paired" here the way Windy
+// Chow does, but one wind is doubled to reach 14 tiles — confirmed.
+function matchWindyRank(counts, rank) {
+	const trial = cloneCounts(counts);
+	const keys = WIND_RANKS.map((w) => `wind-${w}`);
+	if (!takeUniqueSetWithOnePaired(trial, keys)) return false;
+	for (const suit of SUITS_NUM) if (!take(trial, `${suit}-${rank}`, 3)) return false;
+	return remainingTotal(trial) === 0;
+}
+
+function matchHachiBan(counts) {
+	for (const suit of SUITS_NUM) {
+		for (const [lo, hi] of [[1, 8], [2, 9]]) {
+			const base = cloneCounts(counts);
+			if (!takeRunRange(base, suit, lo, hi)) continue;
+			for (let skip = 0; skip < WIND_RANKS.length; skip++) {
+				const t2 = cloneCounts(base);
+				let ok = true;
+				for (let wi = 0; wi < WIND_RANKS.length; wi++) {
+					if (wi === skip) continue;
+					if (!take(t2, `wind-${WIND_RANKS[wi]}`, 2)) {
+						ok = false;
+						break;
+					}
+				}
+				if (ok && remainingTotal(t2) === 0) return true;
+			}
+			const t3 = cloneCounts(base);
+			if (take(t3, 'dragon-red', 2) && take(t3, 'dragon-green', 2) && take(t3, 'dragon-white', 2) && remainingTotal(t3) === 0) return true;
+		}
+	}
+	return false;
+}
+
+function matchFourBlessings(counts) {
+	const trial = cloneCounts(counts);
+	for (const w of WIND_RANKS) if (!take(trial, `wind-${w}`, 3)) return false;
+	const remaining = Object.entries(trial).filter(([, v]) => v > 0);
+	return remaining.length === 1 && remaining[0][1] === 2;
+}
+
+function matchWindfall(counts) {
+	const base = cloneCounts(counts);
+	if (!takeEachWind(base)) return false;
+	for (const suit of SUITS_NUM) {
+		if (isExactPairsInSuit(cloneCounts(base), suit, 5)) return true;
+	}
+	return false;
+}
+
+function matchGrandSequence(counts) {
+	for (const suit of SUITS_NUM) {
+		const base = cloneCounts(counts);
+		if (!takeRunRange(base, suit, 1, 9)) continue;
+		for (const honorKey of [...WIND_RANKS.map((w) => `wind-${w}`), ...DRAGON_RANKS.map((d) => `dragon-${d}`)]) {
+			const t2 = cloneCounts(base);
+			if (!take(t2, honorKey, 3)) continue;
+			const remaining = Object.entries(t2).filter(([, v]) => v > 0);
+			if (remaining.length === 1 && remaining[0][1] === 2 && SUITS_NUM.includes(remaining[0][0].split('-')[0])) return true;
+		}
+	}
+	return false;
+}
+
+function matchDragonfly(counts) {
+	const base = cloneCounts(counts);
+	if (!takeEachDragon(base)) return false;
+	for (const suit of SUITS_NUM) {
+		let placed = false;
+		for (let r = 1; r <= 9; r++) {
+			if (take(base, `${suit}-${r}`, 3)) {
+				placed = true;
+				break;
+			}
+		}
+		if (!placed) return false;
+	}
+	const remaining = Object.entries(base).filter(([, v]) => v > 0);
+	return remaining.length === 1 && remaining[0][1] === 2 && SUITS_NUM.includes(remaining[0][0].split('-')[0]);
+}
+
+function matchDragonsBreath(counts) {
+	const base = cloneCounts(counts);
+	if (!takeUniqueSetWithOnePaired(base, DRAGON_RANKS.map((d) => `dragon-${d}`))) return false;
+	for (const suit of SUITS_NUM) {
+		if (isExactPairsInSuit(cloneCounts(base), suit, 5)) return true;
+	}
+	return false;
+}
+
+function matchWrigglyDragon(counts) {
+	for (const suit of SUITS_NUM) {
+		const base = cloneCounts(counts);
+		if (!takeRunRange(base, suit, 1, 9)) continue;
+		for (const chosen of DRAGON_RANKS) {
+			const t2 = cloneCounts(base);
+			let ok = true;
+			for (const d of DRAGON_RANKS) {
+				if (!take(t2, `dragon-${d}`, d === chosen ? 3 : 1)) {
+					ok = false;
+					break;
+				}
+			}
+			if (ok && remainingTotal(t2) === 0) return true;
+		}
+	}
+	return false;
+}
+
+function matchAllPairRubyJade(counts) {
+	const base = cloneCounts(counts);
+	if (!take(base, 'dragon-green', 2) || !take(base, 'dragon-red', 2)) return false;
+	const pool = new Set([...RED_BAMBOO_RANKS, ...GREEN_BAMBOO_RANKS]);
+	let pairs = 0;
+	for (const [k, v] of Object.entries(base)) {
+		if (v <= 0) continue;
+		if (!k.startsWith('bamboo-')) return false;
+		if (!pool.has(parseInt(k.split('-')[1], 10))) return false;
+		if (v !== 2) return false;
+		pairs++;
+	}
+	return pairs === 5;
+}
+
+function matchSparrowsSanctuary(counts) {
+	const trial = cloneCounts(counts);
+	if (!take(trial, 'bamboo-1', 4)) return false;
+	for (const r of GREEN_BAMBOO_RANKS) if (!take(trial, `bamboo-${r}`, 2)) return false;
+	return remainingTotal(trial) === 0;
+}
+
+function matchColorDragonSuitHand(counts, dragon, suit) {
+	const trial = cloneCounts(counts);
+	if (!take(trial, `dragon-${dragon}`, 3)) return false;
+	const ranksAvailable = [];
+	for (let r = 1; r <= 9; r++) if ((trial[`${suit}-${r}`] || 0) >= 3) ranksAvailable.push(r);
+	for (let i = 0; i < ranksAvailable.length; i++) {
+		for (let j = i + 1; j < ranksAvailable.length; j++) {
+			for (let k = j + 1; k < ranksAvailable.length; k++) {
+				const t2 = cloneCounts(trial);
+				take(t2, `${suit}-${ranksAvailable[i]}`, 3);
+				take(t2, `${suit}-${ranksAvailable[j]}`, 3);
+				take(t2, `${suit}-${ranksAvailable[k]}`, 3);
+				if (isExactPairsInSuit(t2, suit, 1)) return true;
+			}
+		}
+	}
+	return false;
+}
+
+function matchThreeGreatScholars(counts) {
+	const trial = cloneCounts(counts);
+	for (const d of DRAGON_RANKS) if (!take(trial, `dragon-${d}`, 3)) return false;
+	for (const suit of SUITS_NUM) {
+		for (let r = 1; r <= 9; r++) {
+			const t2 = cloneCounts(trial);
+			if (take(t2, `${suit}-${r}`, 3)) {
+				const remaining = Object.entries(t2).filter(([, v]) => v > 0);
+				if (remaining.length === 1 && remaining[0][1] === 2 && SUITS_NUM.includes(remaining[0][0].split('-')[0])) return true;
+			}
+		}
+		for (let r = 1; r <= 7; r++) {
+			const t2 = cloneCounts(trial);
+			if (takeChow(t2, suit, r)) {
+				const remaining = Object.entries(t2).filter(([, v]) => v > 0);
+				if (remaining.length === 1 && remaining[0][1] === 2 && SUITS_NUM.includes(remaining[0][0].split('-')[0])) return true;
+			}
+		}
+	}
+	return false;
+}
+
+function matchGuardianDragon(counts) {
+	for (const suit of SUITS_NUM) {
+		const base = cloneCounts(counts);
+		if (!takeRunRange(base, suit, 1, 9)) continue;
+		for (const pungD of DRAGON_RANKS) {
+			for (const pairD of DRAGON_RANKS) {
+				if (pungD === pairD) continue;
+				const t2 = cloneCounts(base);
+				if (take(t2, `dragon-${pungD}`, 3) && take(t2, `dragon-${pairD}`, 2) && remainingTotal(t2) === 0) return true;
+			}
+		}
+	}
+	return false;
+}
+
+function matchUniqueWonder(counts) {
+	const keys = [
+		...WIND_RANKS.map((w) => `wind-${w}`),
+		...DRAGON_RANKS.map((d) => `dragon-${d}`),
+		...SUITS_NUM.flatMap((s) => [`${s}-1`, `${s}-9`])
+	];
+	const trial = cloneCounts(counts);
+	return takeUniqueSetWithOnePaired(trial, keys) && remainingTotal(trial) === 0;
+}
+
+function matchFiveOddHonours(counts) {
+	const honorKeys = [...WIND_RANKS.map((w) => `wind-${w}`), ...DRAGON_RANKS.map((d) => `dragon-${d}`)];
+	for (const suit of SUITS_NUM) {
+		const base = cloneCounts(counts);
+		if (!takeRunRange(base, suit, 1, 9)) continue;
+		let honorCount = 0;
+		let ok = true;
+		for (const k of honorKeys) {
+			const c = base[k] || 0;
+			if (c === 1) honorCount++;
+			else if (c !== 0) {
+				ok = false;
+				break;
+			}
+		}
+		if (ok && honorCount === 5 && remainingTotal(base) === 5) return true;
+	}
+	return false;
+}
+
+function matchDragonsTail(counts) {
+	for (const suit of SUITS_NUM) {
+		const base = cloneCounts(counts);
+		if (!takeRunRange(base, suit, 1, 9)) continue;
+		for (const d of DRAGON_RANKS) {
+			for (const w of WIND_RANKS) {
+				const t2 = cloneCounts(base);
+				if (take(t2, `dragon-${d}`, 3) && take(t2, `wind-${w}`, 2) && remainingTotal(t2) === 0) return true;
+				const t3 = cloneCounts(base);
+				if (take(t3, `wind-${w}`, 3) && take(t3, `dragon-${d}`, 2) && remainingTotal(t3) === 0) return true;
+			}
+		}
+	}
+	return false;
+}
+
+function matchHoveringAngel(counts, ctx) {
+	const base = cloneCounts(counts);
+	if (!take(base, `wind-${ctx.seatWind}`, 3)) return false;
+	for (const suit of SUITS_NUM) {
+		if (!takeAnyChow(base, suit)) return false;
+	}
+	for (const d of DRAGON_RANKS) {
+		const t2 = cloneCounts(base);
+		if (take(t2, `dragon-${d}`, 2) && remainingTotal(t2) === 0) return true;
+	}
+	return false;
+}
+
+function matchHeavenlyTwins(counts) {
+	for (const suit of SUITS_NUM) {
+		if (isExactPairsInSuit(cloneCounts(counts), suit, 7)) return true;
+	}
+	return false;
+}
+
+// "All Pair" (500) vs "All Pair Honours" (1000): read as plain Seven Pairs (any tiles)
+// vs. the stricter version where every pair must be a terminal/Wind/Dragon — best-effort
+// reading of two short-list rows that would otherwise look like the same hand.
+function matchAllPair(counts) {
+	let total = 0;
+	for (const v of Object.values(counts)) {
+		if (v % 2 !== 0) return false;
+		total += v;
+	}
+	return total === 14;
+}
+
+function matchAllPairHonours(counts) {
+	let total = 0;
+	for (const [k, v] of Object.entries(counts)) {
+		if (v <= 0) continue;
+		if (v % 2 !== 0) return false;
+		const [suit, rank] = k.split('-');
+		if (!(suit === 'wind' || suit === 'dragon' || rank === '1' || rank === '9')) return false;
+		total += v;
+	}
+	return total === 14;
+}
+
+// Knitting: seven distinct numbers, each held as a pair confined to one of two chosen
+// suits (no third suit, no honors) — confirmed: "7 pairs same number in 2 suits", each
+// individual pair same-suit.
+function matchKnitting(counts) {
+	for (const suitA of SUITS_NUM) {
+		for (const suitB of SUITS_NUM) {
+			if (suitA === suitB) continue;
+			const other = SUITS_NUM.find((s) => s !== suitA && s !== suitB);
+			let usesOutside = false;
+			for (const [k, v] of Object.entries(counts)) {
+				if (v > 0 && (k.startsWith(`${other}-`) || k.startsWith('wind-') || k.startsWith('dragon-'))) usesOutside = true;
+			}
+			if (usesOutside) continue;
+			let pairRanks = 0;
+			let ok = true;
+			for (let r = 1; r <= 9; r++) {
+				const ca = counts[`${suitA}-${r}`] || 0;
+				const cb = counts[`${suitB}-${r}`] || 0;
+				const total = ca + cb;
+				if (total === 0) continue;
+				if (total !== 2 || (ca !== 2 && cb !== 2)) {
+					ok = false;
+					break;
+				}
+				pairRanks++;
+			}
+			if (ok && pairRanks === 7) return true;
+		}
+	}
+	return false;
+}
+
+// Triple Knitting: four numbers each held once in all three suits, plus one same-suit pair —
+// confirmed: "4 sets same number in 3 suits + knitting pair".
+function matchTripleKnitting(counts) {
+	const ranks = [];
+	for (let r = 1; r <= 9; r++) if (SUITS_NUM.every((s) => (counts[`${s}-${r}`] || 0) >= 1)) ranks.push(r);
+	for (let a = 0; a < ranks.length; a++) {
+		for (let b = a + 1; b < ranks.length; b++) {
+			for (let c = b + 1; c < ranks.length; c++) {
+				for (let d = c + 1; d < ranks.length; d++) {
+					const chosen = [ranks[a], ranks[b], ranks[c], ranks[d]];
+					const trial = cloneCounts(counts);
+					for (const r of chosen) for (const s of SUITS_NUM) take(trial, `${s}-${r}`, 1);
+					const remaining = Object.entries(trial).filter(([, v]) => v > 0);
+					if (remaining.length === 1 && remaining[0][1] === 2) return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
+// Big Robert: best-effort reading, FLAGGED for a closer look at page 14 — a run of four
+// consecutive numbers in each suit, plus a pair of a Wind or Dragon. The book's "(if Numbers
+// same = L)" limit-hand bonus isn't applied. There may also be a distinct "Little Robert"
+// (500/200, "Chow in each suit + P/K + Pr in any suit") that this short-list entry relates
+// to — unconfirmed, and that pattern doesn't obviously match "Big Robert" as coded here.
+function matchBigRobert(counts) {
+	const base = cloneCounts(counts);
+	for (const suit of SUITS_NUM) {
+		let placed = false;
+		for (let r = 1; r <= 6; r++) {
+			const t2 = cloneCounts(base);
+			if (take(t2, `${suit}-${r}`, 1) && take(t2, `${suit}-${r + 1}`, 1) && take(t2, `${suit}-${r + 2}`, 1) && take(t2, `${suit}-${r + 3}`, 1)) {
+				Object.assign(base, t2);
+				placed = true;
+				break;
+			}
+		}
+		if (!placed) return false;
+	}
+	for (const key of [...WIND_RANKS.map((w) => `wind-${w}`), ...DRAGON_RANKS.map((d) => `dragon-${d}`)]) {
+		const t2 = cloneCounts(base);
+		if (take(t2, key, 2) && remainingTotal(t2) === 0) return true;
+	}
+	return false;
+}
+
+// Moon at Bottom of Well: "three in ascending order" = a Run 1-9 (123, 456, 789), plus a
+// fourth chow and a pair on top of that, all in Dots.
+function matchMoonAtBottomOfWell(counts) {
+	const suit = 'dots';
+	const base = cloneCounts(counts);
+	if (!takeRunRange(base, suit, 1, 9)) return false;
+	for (let cr = 1; cr <= 7; cr++) {
+		const t2 = cloneCounts(base);
+		if (!takeChow(t2, suit, cr)) continue;
+		const remaining = Object.entries(t2).filter(([, v]) => v > 0);
+		if (remaining.length === 1 && remaining[0][1] === 2 && remaining[0][0].startsWith(`${suit}-`)) return true;
+	}
+	return false;
+}
+
+const SPECIAL_HANDS = [
+	{ name: 'Wriggly Snake', winning: 1000, fishing: 400, matches: (c) => matchWrigglySnake(c) },
+	{ name: 'Run, Pung & Pair', winning: 1000, fishing: 400, matches: (c) => matchRunPungPair(c) },
+	{ name: "Greta's Garden", winning: 1000, fishing: 400, matches: (c) => matchGretasGarden(c) },
+	{ name: "Greta's Dragon", winning: 1000, fishing: 400, matches: (c) => matchGretasDragon(c) },
+	{ name: "Gertie's Garter", winning: 1000, fishing: 400, matches: (c) => matchGertiesGarter(c) },
+	{ name: 'Red Lantern', winning: 2000, fishing: 800, matches: (c, ctx) => matchRedLantern(c, ctx) },
+	{ name: 'Gates of Heaven', winning: 1000, fishing: 400, matches: (c) => matchGatesOfHeaven(c) },
+	{ name: 'Confused Gates', winning: 1000, fishing: 400, matches: (c) => matchConfusedGates(c) },
+	{ name: 'Windy Chow', winning: 500, fishing: 200, matches: (c) => matchWindyChow(c) },
+	{ name: 'Big Robert', winning: 500, fishing: 200, matches: (c) => matchBigRobert(c) },
+	{ name: 'Moon at Bottom of Well', winning: 1000, fishing: 400, matches: (c) => matchMoonAtBottomOfWell(c) },
+	{ name: 'Knitting', winning: 500, fishing: 200, matches: (c) => matchKnitting(c) },
+	{ name: 'Triple Knitting', winning: 500, fishing: 200, matches: (c) => matchTripleKnitting(c) },
+	{ name: 'All Pair', winning: 500, fishing: 200, matches: (c) => matchAllPair(c) },
+	{ name: 'All Pair Honours', winning: 1000, fishing: 400, matches: (c) => matchAllPairHonours(c) },
+	{ name: 'Heavenly Twins', winning: 1000, fishing: 400, matches: (c) => matchHeavenlyTwins(c) },
+	{ name: 'Windfall', winning: 1000, fishing: 400, matches: (c) => matchWindfall(c) },
+	{ name: 'All Pair Ruby Jade', winning: 1000, fishing: 400, matches: (c) => matchAllPairRubyJade(c) },
+	{ name: "Sparrow's Sanctuary", winning: 1500, fishing: 600, matches: (c) => matchSparrowsSanctuary(c) },
+	{ name: 'Windy Ones', winning: 1000, fishing: 400, matches: (c) => matchWindyRank(c, 1) },
+	{ name: 'Windy Nines', winning: 1000, fishing: 400, matches: (c) => matchWindyRank(c, 9) },
+	{ name: 'Hachi Ban', winning: 1000, fishing: 400, matches: (c) => matchHachiBan(c) },
+	{ name: 'Four Blessings', winning: 1500, fishing: 600, matches: (c) => matchFourBlessings(c) },
+	{ name: 'Grand Sequence', winning: 1000, fishing: 400, matches: (c) => matchGrandSequence(c) },
+	{ name: 'Dragonfly', winning: 1000, fishing: 400, matches: (c) => matchDragonfly(c) },
+	{ name: "Dragon's Breath", winning: 1000, fishing: 400, matches: (c) => matchDragonsBreath(c) },
+	{ name: 'Wriggly Dragon', winning: 1000, fishing: 400, matches: (c) => matchWrigglyDragon(c) },
+	{ name: 'Green Jade', winning: 1000, fishing: 400, matches: (c) => matchColorDragonSuitHand(c, 'green', 'bamboo') },
+	{ name: 'Red Coral', winning: 1000, fishing: 400, matches: (c) => matchColorDragonSuitHand(c, 'red', 'characters') },
+	{ name: 'White Opal', winning: 1000, fishing: 400, matches: (c) => matchColorDragonSuitHand(c, 'white', 'dots') },
+	{ name: 'Guardian Dragon', winning: 1000, fishing: 400, matches: (c) => matchGuardianDragon(c) },
+	{ name: 'Three Great Scholars', winning: 1500, fishing: 600, matches: (c) => matchThreeGreatScholars(c) },
+	{ name: 'Unique Wonder', winning: 2000, fishing: 800, matches: (c) => matchUniqueWonder(c) },
+	{ name: 'Five Odd Honours', winning: 500, fishing: 200, matches: (c) => matchFiveOddHonours(c) },
+	{ name: "Dragon's Tail", winning: 1000, fishing: 400, matches: (c) => matchDragonsTail(c) },
+	{ name: 'Hovering Angel', winning: 1000, fishing: 400, matches: (c, ctx) => matchHoveringAngel(c, ctx) }
+];
+
+// ---------- Full List (The Mah Jong Player's Companion, "Full Synopsis of Special Hands",
+// pp.56-60) ----------
+// Adds ~45 more named hands on top of the Short List above. A blanket simplification here:
+// wherever the book writes "P/K" without an explicit "X/X" alternative, this only checks for
+// a pung-worth (3) in the tally, which is capped at 3 for any declared kong anyway — the only
+// gap is a kong's worth (4) sitting fully concealed and never declared, which is rare enough
+// to accept as a known simplification rather than doubling every check in this section.
+
+const CORRESPONDING_DRAGON = { characters: 'red', bamboo: 'green', dots: 'white' };
+const ODD_RANKS = [1, 3, 5, 7, 9];
+const EVEN_RANKS = [2, 4, 6, 8];
+const BLUE_CIRCLE_RANKS = [2, 3, 4, 5, 8, 9];
+
+function matchGuardianWinds(counts) {
+	for (const suit of SUITS_NUM) {
+		const base = cloneCounts(counts);
+		if (!takeRunRange(base, suit, 1, 9)) continue;
+		for (const pungW of WIND_RANKS) {
+			for (const pairW of WIND_RANKS) {
+				if (pungW === pairW) continue;
+				const t2 = cloneCounts(base);
+				if (take(t2, `wind-${pungW}`, 3) && take(t2, `wind-${pairW}`, 2) && remainingTotal(t2) === 0) return true;
+			}
+		}
+	}
+	return false;
+}
+
+function matchDragonsGates(counts) {
+	for (const suit of SUITS_NUM) {
+		const trial = cloneCounts(counts);
+		const keys = Array.from({ length: 7 }, (_, i) => `${suit}-${i + 2}`);
+		if (!takeUniqueSetWithOnePaired(trial, keys)) continue;
+		const dragon = CORRESPONDING_DRAGON[suit];
+		for (const terminal of [1, 9]) {
+			const t2 = cloneCounts(trial);
+			if (take(t2, `${suit}-${terminal}`, 3) && take(t2, `dragon-${dragon}`, 3) && remainingTotal(t2) === 0) return true;
+		}
+	}
+	return false;
+}
+
+function matchDragonsTeeth(counts) {
+	for (const suit of ['characters', 'dots']) {
+		const base = cloneCounts(counts);
+		if (!take(base, 'dragon-red', 3) || !take(base, 'dragon-white', 3)) continue;
+		for (const lo of [1, 2]) {
+			const keys = Array.from({ length: 7 }, (_, i) => `${suit}-${lo + i}`);
+			const t2 = cloneCounts(base);
+			if (takeUniqueSetWithOnePaired(t2, keys) && remainingTotal(t2) === 0) return true;
+		}
+	}
+	return false;
+}
+
+function matchYinYang(counts) {
+	for (const suitA of SUITS_NUM) {
+		for (const suitB of SUITS_NUM) {
+			if (suitA === suitB) continue;
+			const trial = cloneCounts(counts);
+			if (
+				take(trial, `${suitA}-1`, 2) &&
+				take(trial, `${suitA}-2`, 1) &&
+				take(trial, `${suitA}-3`, 1) &&
+				take(trial, `${suitA}-4`, 1) &&
+				take(trial, `${suitA}-5`, 2) &&
+				take(trial, `${suitB}-5`, 2) &&
+				take(trial, `${suitB}-6`, 1) &&
+				take(trial, `${suitB}-7`, 1) &&
+				take(trial, `${suitB}-8`, 1) &&
+				take(trial, `${suitB}-9`, 2) &&
+				remainingTotal(trial) === 0
+			) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+function matchThreePhilosophers(counts) {
+	const base = cloneCounts(counts);
+	for (const suit of SUITS_NUM) {
+		if (!takeAnyChow(base, suit)) return false;
+	}
+	for (const suit of SUITS_NUM) {
+		for (let r = 1; r <= 7; r++) {
+			const t2 = cloneCounts(base);
+			if (!takeChow(t2, suit, r)) continue;
+			const remaining = Object.entries(t2).filter(([, v]) => v > 0);
+			if (remaining.length === 1 && remaining[0][1] === 2 && SUITS_NUM.includes(remaining[0][0].split('-')[0])) return true;
+		}
+	}
+	return false;
+}
+
+function matchCrazyChows(counts) {
+	function search(remainingChows, trial) {
+		if (remainingChows === 0) {
+			const remaining = Object.entries(trial).filter(([, v]) => v > 0);
+			return remaining.length === 1 && remaining[0][1] === 2 && SUITS_NUM.includes(remaining[0][0].split('-')[0]);
+		}
+		for (const suit of SUITS_NUM) {
+			for (let r = 1; r <= 7; r++) {
+				const t2 = cloneCounts(trial);
+				if (takeChow(t2, suit, r) && search(remainingChows - 1, t2)) return true;
+			}
+		}
+		return false;
+	}
+	return search(4, cloneCounts(counts));
+}
+
+function matchLittleRobert(counts) {
+	const base = cloneCounts(counts);
+	for (const suit of SUITS_NUM) {
+		if (!takeAnyChow(base, suit)) return false;
+	}
+	for (const suit of SUITS_NUM) {
+		for (let r = 1; r <= 9; r++) {
+			const t2 = cloneCounts(base);
+			if (!take(t2, `${suit}-${r}`, 3)) continue;
+			const remaining = Object.entries(t2).filter(([, v]) => v > 0);
+			if (remaining.length === 1 && remaining[0][1] === 2 && SUITS_NUM.includes(remaining[0][0].split('-')[0])) return true;
+		}
+	}
+	return false;
+}
+
+function matchChowRankTriple(counts, startRank) {
+	const trial = cloneCounts(counts);
+	for (const suit of SUITS_NUM) {
+		if (!takeChow(trial, suit, startRank)) return false;
+	}
+	const keys = WIND_RANKS.map((w) => `wind-${w}`);
+	return takeUniqueSetWithOnePaired(trial, keys) && remainingTotal(trial) === 0;
+}
+
+function matchChopSuey(counts) {
+	return matchChowRankTriple(counts, 1);
+}
+
+function matchChowMien(counts) {
+	return matchChowRankTriple(counts, 7);
+}
+
+function matchLittleBrother(counts, ctx) {
+	const base = cloneCounts(counts);
+	for (const suit of SUITS_NUM) {
+		if (!takeAnyChow(base, suit)) return false;
+	}
+	if (!take(base, `wind-${ctx.seatWind}`, 2)) return false;
+	for (const suit of SUITS_NUM) {
+		for (let r = 1; r <= 7; r++) {
+			const t2 = cloneCounts(base);
+			if (takeChow(t2, suit, r) && remainingTotal(t2) === 0) return true;
+		}
+	}
+	return false;
+}
+
+function matchAppleBlossom(counts) {
+	function search(remainingChows, trial) {
+		if (remainingChows === 0) return take(trial, 'dragon-white', 3) && take(trial, 'dragon-green', 2) && remainingTotal(trial) === 0;
+		for (const suit of SUITS_NUM) {
+			for (let r = 1; r <= 7; r++) {
+				const t2 = cloneCounts(trial);
+				if (takeChow(t2, suit, r) && search(remainingChows - 1, t2)) return true;
+			}
+		}
+		return false;
+	}
+	return search(3, cloneCounts(counts));
+}
+
+function matchTheProfessors(counts, ctx) {
+	function search(remainingChows, trial) {
+		if (remainingChows === 0) return takeEachDragon(trial) && take(trial, `wind-${ctx.seatWind}`, 2) && remainingTotal(trial) === 0;
+		for (const suit of SUITS_NUM) {
+			for (let r = 1; r <= 7; r++) {
+				const t2 = cloneCounts(trial);
+				if (takeChow(t2, suit, r) && search(remainingChows - 1, t2)) return true;
+			}
+		}
+		return false;
+	}
+	return search(3, cloneCounts(counts));
+}
+
+// Chow Chow requires the whole hand to have come from self-drawn wall tiles with no calls,
+// ending on the last tile in the wall. `ctx.selfDraw`/`ctx.wonWithLastWallTile` are only set
+// when scoring an actual win (see applySpecialWinnerScore) — in a fishing check they're
+// undefined, so only the concealment/shape requirement is checked there.
+function matchChowChow(counts, ctx) {
+	if (!ctx.player || !ctx.player.melds.every((m) => m.concealed)) return false;
+	if (ctx.selfDraw === false || ctx.wonWithLastWallTile === false) return false;
+	for (const suit of SUITS_NUM) {
+		function search(remainingChows, trial) {
+			if (remainingChows === 0) {
+				const remaining = Object.entries(trial).filter(([, v]) => v > 0);
+				return remaining.length === 1 && remaining[0][1] === 2 && remaining[0][0].startsWith(`${suit}-`);
+			}
+			for (let r = 1; r <= 7; r++) {
+				const t2 = cloneCounts(trial);
+				if (takeChow(t2, suit, r) && search(remainingChows - 1, t2)) return true;
+			}
+			return false;
+		}
+		if (search(4, cloneCounts(counts))) return true;
+	}
+	return false;
+}
+
+function matchOddsAndEvens(counts) {
+	for (const evenSuit of SUITS_NUM) {
+		const oddSuits = SUITS_NUM.filter((s) => s !== evenSuit);
+		const trial = cloneCounts(counts);
+		let ok = true;
+		for (const suit of oddSuits) {
+			for (const r of ODD_RANKS) {
+				if (!take(trial, `${suit}-${r}`, 1)) {
+					ok = false;
+					break;
+				}
+			}
+			if (!ok) break;
+		}
+		if (!ok) continue;
+		for (const r of EVEN_RANKS) {
+			if (!take(trial, `${evenSuit}-${r}`, 1)) {
+				ok = false;
+				break;
+			}
+		}
+		if (ok && remainingTotal(trial) === 0) return true;
+	}
+	return false;
+}
+
+function matchHeadsAndTails(counts) {
+	const terminalKeys = SUITS_NUM.flatMap((s) => [`${s}-1`, `${s}-9`]);
+	function chooseMelds(remaining, trial) {
+		if (remaining === 0) {
+			const rem = Object.entries(trial).filter(([, v]) => v > 0);
+			return rem.length === 1 && rem[0][1] === 2 && terminalKeys.includes(rem[0][0]);
+		}
+		for (const key of terminalKeys) {
+			const t2 = cloneCounts(trial);
+			if (take(t2, key, 3) && chooseMelds(remaining - 1, t2)) return true;
+		}
+		return false;
+	}
+	return chooseMelds(4, cloneCounts(counts));
+}
+
+function matchRobin(counts) {
+	for (const suitA of SUITS_NUM) {
+		for (const suitB of SUITS_NUM) {
+			if (suitB === suitA) continue;
+			const suitC = SUITS_NUM.find((s) => s !== suitA && s !== suitB);
+			for (let ra = 1; ra <= 7; ra++) {
+				const t1 = cloneCounts(counts);
+				if (!takeChow(t1, suitA, ra)) continue;
+				for (let rb1 = 1; rb1 <= 7; rb1++) {
+					const t2 = cloneCounts(t1);
+					if (!takeChow(t2, suitB, rb1)) continue;
+					for (let rb2 = 1; rb2 <= 7; rb2++) {
+						const t3 = cloneCounts(t2);
+						if (!takeChow(t3, suitB, rb2)) continue;
+						for (let rc = 1; rc <= 7; rc++) {
+							const t4 = cloneCounts(t3);
+							if (!takeChow(t4, suitC, rc)) continue;
+							const remaining = Object.entries(t4).filter(([, v]) => v > 0);
+							if (remaining.length === 1 && remaining[0][1] === 2 && remaining[0][0].startsWith(`${suitC}-`)) return true;
+						}
+					}
+				}
+			}
+		}
+	}
+	return false;
+}
+
+function matchAllPairJade(counts) {
+	const optionA = cloneCounts(counts);
+	if (take(optionA, 'dragon-green', 2)) {
+		let pairs = 0;
+		let ok = true;
+		for (const [k, v] of Object.entries(optionA)) {
+			if (v <= 0) continue;
+			if (!k.startsWith('bamboo-') || !GREEN_BAMBOO_RANKS.includes(parseInt(k.split('-')[1], 10)) || (v !== 2 && v !== 4)) {
+				ok = false;
+				break;
+			}
+			pairs += v / 2;
+		}
+		if (ok && pairs === 6) return true;
+	}
+	const optionB = cloneCounts(counts);
+	if (take(optionB, 'dragon-green', 4)) {
+		let pairs = 0;
+		let ok = true;
+		for (const [k, v] of Object.entries(optionB)) {
+			if (v <= 0) continue;
+			if (!k.startsWith('bamboo-') || !GREEN_BAMBOO_RANKS.includes(parseInt(k.split('-')[1], 10)) || v !== 2) {
+				ok = false;
+				break;
+			}
+			pairs++;
+		}
+		if (ok && pairs === 5) return true;
+	}
+	return false;
+}
+
+function matchImperialJade(counts) {
+	for (const dragonCount of [3, 4]) {
+		const base = cloneCounts(counts);
+		if (!take(base, 'dragon-green', dragonCount)) continue;
+		function search(remaining, trial, chowUsed) {
+			if (remaining === 0) {
+				const rem = Object.entries(trial).filter(([, v]) => v > 0);
+				if (rem.length !== 1 || rem[0][1] !== 2) return false;
+				const [k] = rem[0];
+				return k.startsWith('bamboo-') && GREEN_BAMBOO_RANKS.includes(parseInt(k.split('-')[1], 10));
+			}
+			for (let r = 1; r <= 9; r++) {
+				const t2 = cloneCounts(trial);
+				if (take(t2, `bamboo-${r}`, 3) && search(remaining - 1, t2, chowUsed)) return true;
+			}
+			if (!chowUsed) {
+				for (let r = 1; r <= 7; r++) {
+					const t2 = cloneCounts(trial);
+					if (takeChow(t2, 'bamboo', r) && search(remaining - 1, t2, true)) return true;
+				}
+			}
+			return false;
+		}
+		if (search(3, base, false)) return true;
+	}
+	return false;
+}
+
+function matchLilyOfTheValley(counts) {
+	for (const gCount of [3, 4]) {
+		for (const wCount of [3, 4]) {
+			const base = cloneCounts(counts);
+			if (!take(base, 'dragon-green', gCount) || !take(base, 'dragon-white', wCount)) continue;
+			for (let r1 = 1; r1 <= 9; r1++) {
+				const t2 = cloneCounts(base);
+				if (!take(t2, `bamboo-${r1}`, 3)) continue;
+				for (let r2 = 1; r2 <= 9; r2++) {
+					const t3 = cloneCounts(t2);
+					if (!take(t3, `bamboo-${r2}`, 3)) continue;
+					const remaining = Object.entries(t3).filter(([, v]) => v > 0);
+					if (remaining.length === 1 && remaining[0][1] === 2) {
+						const rank = parseInt(remaining[0][0].split('-')[1], 10);
+						if (remaining[0][0].startsWith('bamboo-') && GREEN_BAMBOO_RANKS.includes(rank)) return true;
+					}
+				}
+			}
+		}
+	}
+	return false;
+}
+
+function matchRedLily(counts) {
+	for (const rCount of [3, 4]) {
+		for (const wCount of [3, 4]) {
+			const base = cloneCounts(counts);
+			if (!take(base, 'dragon-red', rCount) || !take(base, 'dragon-white', wCount)) continue;
+			for (let r1 = 1; r1 <= 9; r1++) {
+				const t2 = cloneCounts(base);
+				if (!take(t2, `bamboo-${r1}`, 3)) continue;
+				for (let r2 = 1; r2 <= 9; r2++) {
+					const t3 = cloneCounts(t2);
+					if (!take(t3, `bamboo-${r2}`, 3)) continue;
+					const remaining = Object.entries(t3).filter(([, v]) => v > 0);
+					if (remaining.length === 1 && remaining[0][1] === 2) {
+						const rank = parseInt(remaining[0][0].split('-')[1], 10);
+						if (remaining[0][0].startsWith('bamboo-') && RED_BAMBOO_RANKS.includes(rank)) return true;
+					}
+				}
+			}
+		}
+	}
+	return false;
+}
+
+function matchRoyalRuby(counts) {
+	for (const rCount of [3, 4]) {
+		const base = cloneCounts(counts);
+		if (!take(base, 'dragon-red', rCount)) continue;
+		function search(remaining, trial) {
+			if (remaining === 0) {
+				const rem = Object.entries(trial).filter(([, v]) => v > 0);
+				if (rem.length !== 1 || rem[0][1] !== 2) return false;
+				const [k] = rem[0];
+				return k.startsWith('bamboo-') && RED_BAMBOO_RANKS.includes(parseInt(k.split('-')[1], 10));
+			}
+			for (let r = 1; r <= 9; r++) {
+				const t2 = cloneCounts(trial);
+				if (take(t2, `bamboo-${r}`, 3) && search(remaining - 1, t2)) return true;
+			}
+			return false;
+		}
+		if (search(3, base)) return true;
+	}
+	return false;
+}
+
+function matchRubyJade(counts) {
+	for (const rCount of [3, 4]) {
+		for (const gCount of [3, 4]) {
+			const base = cloneCounts(counts);
+			if (!take(base, 'dragon-red', rCount) || !take(base, 'dragon-green', gCount)) continue;
+			for (let r1 = 1; r1 <= 9; r1++) {
+				const t2 = cloneCounts(base);
+				if (!take(t2, `bamboo-${r1}`, 3)) continue;
+				for (let r2 = 1; r2 <= 9; r2++) {
+					const t3 = cloneCounts(t2);
+					if (!take(t3, `bamboo-${r2}`, 3)) continue;
+					const remaining = Object.entries(t3).filter(([, v]) => v > 0);
+					if (remaining.length === 1 && remaining[0][1] === 2) {
+						const rank = parseInt(remaining[0][0].split('-')[1], 10);
+						if (remaining[0][0].startsWith('bamboo-') && (RED_BAMBOO_RANKS.includes(rank) || GREEN_BAMBOO_RANKS.includes(rank))) return true;
+					}
+				}
+			}
+		}
+	}
+	return false;
+}
+
+function matchLillypilly(counts) {
+	const trial = cloneCounts(counts);
+	if (!take(trial, 'dragon-green', 3) || !take(trial, 'dragon-white', 2)) return false;
+	function search(remaining, t) {
+		if (remaining === 0) return remainingTotal(t) === 0;
+		for (let r = 1; r <= 9; r++) {
+			const t2 = cloneCounts(t);
+			if (take(t2, `dots-${r}`, 3) && search(remaining - 1, t2)) return true;
+		}
+		return false;
+	}
+	return search(3, trial);
+}
+
+function matchBlueMountains(counts) {
+	const base = cloneCounts(counts);
+	if (!take(base, 'dragon-green', 3)) return false;
+	function search(remaining, trial) {
+		if (remaining === 0) {
+			const rem = Object.entries(trial).filter(([, v]) => v > 0);
+			if (rem.length !== 1 || rem[0][1] !== 2) return false;
+			const [k] = rem[0];
+			return k.startsWith('dots-') && BLUE_CIRCLE_RANKS.includes(parseInt(k.split('-')[1], 10));
+		}
+		for (let r = 1; r <= 9; r++) {
+			const t2 = cloneCounts(trial);
+			if (take(t2, `dots-${r}`, 3) && search(remaining - 1, t2)) return true;
+		}
+		return false;
+	}
+	return search(3, base);
+}
+
+function matchWhiteElephant(counts) {
+	for (const wCount of [3, 4]) {
+		const base = cloneCounts(counts);
+		if (!take(base, 'dragon-white', wCount)) continue;
+		function search(remaining, trial) {
+			if (remaining === 0) {
+				const rem = Object.entries(trial).filter(([, v]) => v > 0);
+				if (rem.length !== 1 || rem[0][1] !== 2) return false;
+				const [k] = rem[0];
+				return k.startsWith('dots-') && EVEN_RANKS.includes(parseInt(k.split('-')[1], 10));
+			}
+			for (let r = 1; r <= 9; r++) {
+				const t2 = cloneCounts(trial);
+				if (take(t2, `dots-${r}`, 3) && search(remaining - 1, t2)) return true;
+			}
+			return false;
+		}
+		if (search(3, base)) return true;
+	}
+	return false;
+}
+
+function matchDrivenSnow(counts) {
+	const base = cloneCounts(counts);
+	if (!take(base, 'dragon-white', 3)) return false;
+	function search(remaining, trial) {
+		if (remaining === 0) {
+			const rem = Object.entries(trial).filter(([, v]) => v > 0);
+			if (rem.length !== 1 || rem[0][1] !== 2) return false;
+			const [k] = rem[0];
+			return k.startsWith('characters-') && ODD_RANKS.includes(parseInt(k.split('-')[1], 10));
+		}
+		for (let r = 1; r <= 9; r++) {
+			const t2 = cloneCounts(trial);
+			if (take(t2, `characters-${r}`, 3) && search(remaining - 1, t2)) return true;
+		}
+		return false;
+	}
+	return search(3, base);
+}
+
+function matchDragonsScales(counts) {
+	const base = cloneCounts(counts);
+	if (!take(base, 'dragon-red', 3)) return false;
+	function search(remaining, trial) {
+		if (remaining === 0) {
+			const rem = Object.entries(trial).filter(([, v]) => v > 0);
+			if (rem.length !== 1 || rem[0][1] !== 2) return false;
+			const [k] = rem[0];
+			return k.startsWith('characters-') && EVEN_RANKS.includes(parseInt(k.split('-')[1], 10));
+		}
+		for (let r = 1; r <= 9; r++) {
+			const t2 = cloneCounts(trial);
+			if (take(t2, `characters-${r}`, 3) && search(remaining - 1, t2)) return true;
+		}
+		return false;
+	}
+	return search(3, base);
+}
+
+function matchDragonette(counts) {
+	for (const suit of SUITS_NUM) {
+		const trial = cloneCounts(counts);
+		if (!takeEachWind(trial)) continue;
+		if (!takeUniqueSetWithOnePaired(trial, DRAGON_RANKS.map((d) => `dragon-${d}`))) continue;
+		let pairs = 0;
+		let ok = true;
+		for (const [k, v] of Object.entries(trial)) {
+			if (v <= 0) continue;
+			if (!k.startsWith(`${suit}-`)) {
+				ok = false;
+				break;
+			}
+			const rank = parseInt(k.split('-')[1], 10);
+			if (rank === 1 || rank === 9 || v !== 2) {
+				ok = false;
+				break;
+			}
+			pairs++;
+		}
+		if (ok && pairs === 3) return true;
+	}
+	return false;
+}
+
+function matchDragonsRun(counts) {
+	for (const suit of SUITS_NUM) {
+		const base = cloneCounts(counts);
+		if (!takeRunRange(base, suit, 1, 9)) continue;
+		if (!takeEachDragon(base)) continue;
+		for (const w of WIND_RANKS) {
+			const t2 = cloneCounts(base);
+			if (take(t2, `wind-${w}`, 2) && remainingTotal(t2) === 0) return true;
+		}
+	}
+	return false;
+}
+
+function matchSunrise(counts) {
+	const base = cloneCounts(counts);
+	if (!take(base, 'wind-E', 3) || !take(base, 'dragon-white', 2)) return false;
+	for (const suit of SUITS_NUM) {
+		let placed = false;
+		for (let r = 2; r <= 8; r++) {
+			if (take(base, `${suit}-${r}`, 3)) {
+				placed = true;
+				break;
+			}
+		}
+		if (!placed) return false;
+	}
+	return remainingTotal(base) === 0;
+}
+
+function matchSunset(counts) {
+	const base = cloneCounts(counts);
+	if (!take(base, 'wind-W', 3) || !take(base, 'dragon-red', 2)) return false;
+	for (const suit of SUITS_NUM) {
+		let placed = false;
+		for (let r = 2; r <= 8; r++) {
+			if (take(base, `${suit}-${r}`, 3)) {
+				placed = true;
+				break;
+			}
+		}
+		if (!placed) return false;
+	}
+	return remainingTotal(base) === 0;
+}
+
+function matchNumbersInParallel(counts) {
+	const honorKeys = [...WIND_RANKS.map((w) => `wind-${w}`), ...DRAGON_RANKS.map((d) => `dragon-${d}`)];
+	for (const pungHonor of honorKeys) {
+		for (const pairHonor of honorKeys) {
+			if (pungHonor === pairHonor) continue;
+			const base = cloneCounts(counts);
+			if (!take(base, pungHonor, 3) || !take(base, pairHonor, 2)) continue;
+			for (let r = 2; r <= 8; r++) {
+				const t2 = cloneCounts(base);
+				let ok = true;
+				for (const suit of SUITS_NUM) {
+					if (!take(t2, `${suit}-${r}`, 3)) {
+						ok = false;
+						break;
+					}
+				}
+				if (ok && remainingTotal(t2) === 0) return true;
+			}
+		}
+	}
+	return false;
+}
+
+// Best-effort reading: "Two P/K of same number in two suits" is taken as two separate
+// number/suit-pair groups (four melds total), since the stated pieces alone don't add up
+// to 14 tiles otherwise.
+function matchNumbersDoubled(counts) {
+	const honorKeys = [...WIND_RANKS.map((w) => `wind-${w}`), ...DRAGON_RANKS.map((d) => `dragon-${d}`)];
+	const suitPairs = [
+		[SUITS_NUM[0], SUITS_NUM[1]],
+		[SUITS_NUM[0], SUITS_NUM[2]],
+		[SUITS_NUM[1], SUITS_NUM[2]]
+	];
+	for (const pairHonor of honorKeys) {
+		const base = cloneCounts(counts);
+		if (!take(base, pairHonor, 2)) continue;
+		for (let rA = 2; rA <= 8; rA++) {
+			for (let rB = 2; rB <= 8; rB++) {
+				if (rA === rB) continue;
+				for (const [s1, s2] of suitPairs) {
+					for (const [s3, s4] of suitPairs) {
+						const t2 = cloneCounts(base);
+						if (
+							take(t2, `${s1}-${rA}`, 3) &&
+							take(t2, `${s2}-${rA}`, 3) &&
+							take(t2, `${s3}-${rB}`, 3) &&
+							take(t2, `${s4}-${rB}`, 3) &&
+							remainingTotal(t2) === 0
+						) {
+							return true;
+						}
+					}
+				}
+			}
+		}
+	}
+	return false;
+}
+
+function matchChineseOdds(counts) {
+	for (const suit of SUITS_NUM) {
+		function search(remaining, trial) {
+			if (remaining === 0) {
+				const rem = Object.entries(trial).filter(([, v]) => v > 0);
+				if (rem.length !== 1 || rem[0][1] !== 2) return false;
+				const [k] = rem[0];
+				return k.startsWith(`${suit}-`) && ODD_RANKS.includes(parseInt(k.split('-')[1], 10));
+			}
+			for (const r of ODD_RANKS) {
+				const t2 = cloneCounts(trial);
+				if (take(t2, `${suit}-${r}`, 3) && search(remaining - 1, t2)) return true;
+			}
+			return false;
+		}
+		if (search(4, cloneCounts(counts))) return true;
+	}
+	return false;
+}
+
+// Seven Twins is All Pair's shape plus the "all tiles from wall inc. last" procedural
+// requirement — see the Chow Chow comment above for how that's checked.
+function matchSevenTwins(counts, ctx) {
+	if (!ctx.player || !ctx.player.melds.every((m) => m.concealed)) return false;
+	if (ctx.selfDraw === false || ctx.wonWithLastWallTile === false) return false;
+	return matchAllPair(counts);
+}
+
+function matchGoldenGates(counts) {
+	for (const suit of SUITS_NUM) {
+		const dragon = CORRESPONDING_DRAGON[suit];
+		const trial = cloneCounts(counts);
+		let ok = true;
+		for (const r of [2, 4, 6, 8]) {
+			if (!take(trial, `${suit}-${r}`, 2)) {
+				ok = false;
+				break;
+			}
+		}
+		if (!ok) continue;
+		for (const terminal of [1, 9]) {
+			const t2 = cloneCounts(trial);
+			if (take(t2, `${suit}-${terminal}`, 3) && take(t2, `dragon-${dragon}`, 3) && remainingTotal(t2) === 0) return true;
+		}
+	}
+	return false;
+}
+
+function matchWindyDragons(counts) {
+	const base = cloneCounts(counts);
+	for (const w of WIND_RANKS) if (!take(base, `wind-${w}`, 2)) return false;
+	for (let i = 0; i < DRAGON_RANKS.length; i++) {
+		for (let j = i + 1; j < DRAGON_RANKS.length; j++) {
+			const t2 = cloneCounts(base);
+			if (take(t2, `dragon-${DRAGON_RANKS[i]}`, 3) && take(t2, `dragon-${DRAGON_RANKS[j]}`, 3) && remainingTotal(t2) === 0) return true;
+		}
+	}
+	return false;
+}
+
+function matchWindvane(counts) {
+	const trial = cloneCounts(counts);
+	if (!takeUniqueSetWithOnePaired(trial, WIND_RANKS.map((w) => `wind-${w}`))) return false;
+	for (const suit of SUITS_NUM) {
+		let placed = false;
+		for (let r = 1; r <= 9; r++) {
+			if (take(trial, `${suit}-${r}`, 3)) {
+				placed = true;
+				break;
+			}
+		}
+		if (!placed) return false;
+	}
+	return remainingTotal(trial) === 0;
+}
+
+function matchCivilWar(counts) {
+	for (const suitA of SUITS_NUM) {
+		for (const suitB of SUITS_NUM) {
+			if (suitA === suitB) continue;
+			const trial = cloneCounts(counts);
+			if (
+				take(trial, 'wind-N', 3) &&
+				take(trial, 'wind-S', 3) &&
+				take(trial, `${suitA}-1`, 2) &&
+				take(trial, `${suitA}-8`, 1) &&
+				take(trial, `${suitA}-6`, 1) &&
+				take(trial, `${suitB}-1`, 1) &&
+				take(trial, `${suitB}-8`, 1) &&
+				take(trial, `${suitB}-6`, 1) &&
+				take(trial, `${suitB}-5`, 1) &&
+				remainingTotal(trial) === 0
+			) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// Up You Go / Down You Go need the kong's literal 4th tile (their 14-tile shape isn't the
+// usual "4 melds + pair", so a kong here isn't just an interchangeable pung) — the general
+// tally caps every kong at 3, so once a real concealed kong is confirmed we restore the tile
+// the cap dropped before checking counts.
+function matchUpYouGo(counts, ctx) {
+	if (!ctx.player) return false;
+	for (const suit of SUITS_NUM) {
+		const hasConcealedKong = ctx.player.melds.some((m) => m.type === 'kong' && m.concealed && m.tiles[0].suit === suit && m.tiles[0].rank === 8);
+		if (!hasConcealedKong) continue;
+		const trial = cloneCounts(counts);
+		trial[`${suit}-8`] = (trial[`${suit}-8`] || 0) + 1;
+		if (!takeEachWind(trial)) continue;
+		if (take(trial, `${suit}-2`, 1) && take(trial, `${suit}-4`, 2) && take(trial, `${suit}-6`, 3) && take(trial, `${suit}-8`, 4) && remainingTotal(trial) === 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function matchDownYouGo(counts, ctx) {
+	if (!ctx.player) return false;
+	for (const suit of SUITS_NUM) {
+		const hasConcealedKong = ctx.player.melds.some((m) => m.type === 'kong' && m.concealed && m.tiles[0].suit === suit && m.tiles[0].rank === 2);
+		if (!hasConcealedKong) continue;
+		const trial = cloneCounts(counts);
+		trial[`${suit}-2`] = (trial[`${suit}-2`] || 0) + 1;
+		if (!takeEachWind(trial)) continue;
+		if (take(trial, `${suit}-2`, 4) && take(trial, `${suit}-4`, 3) && take(trial, `${suit}-6`, 2) && take(trial, `${suit}-8`, 1) && remainingTotal(trial) === 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function matchRedWaratah(counts) {
+	const base = cloneCounts(counts);
+	if (!take(base, 'dragon-red', 3) || !take(base, 'dragon-green', 2)) return false;
+	for (const redBambooRank of RED_BAMBOO_RANKS) {
+		const t2 = cloneCounts(base);
+		if (!take(t2, `bamboo-${redBambooRank}`, 3)) continue;
+		for (let cr = 1; cr <= 9; cr++) {
+			const t3 = cloneCounts(t2);
+			if (!take(t3, `dots-${cr}`, 3)) continue;
+			for (let hr = 1; hr <= 9; hr++) {
+				const t4 = cloneCounts(t3);
+				if (take(t4, `characters-${hr}`, 3) && remainingTotal(t4) === 0) return true;
+			}
+		}
+	}
+	return false;
+}
+
+function matchAllWindsAndDragons(counts) {
+	const honorKeys = [...WIND_RANKS.map((w) => `wind-${w}`), ...DRAGON_RANKS.map((d) => `dragon-${d}`)];
+	function search(remaining, trial, used) {
+		if (remaining === 0) {
+			const rem = Object.entries(trial).filter(([, v]) => v > 0);
+			if (rem.length !== 1 || rem[0][1] !== 2) return false;
+			return honorKeys.includes(rem[0][0]);
+		}
+		for (const key of honorKeys) {
+			if (used.has(key)) continue;
+			const t2 = cloneCounts(trial);
+			if (take(t2, key, 3) && search(remaining - 1, t2, new Set([...used, key]))) return true;
+		}
+		return false;
+	}
+	return search(4, cloneCounts(counts), new Set());
+}
+
+const FULL_SPECIAL_HANDS = [
+	...SPECIAL_HANDS,
+	{ name: 'Guardian Winds', winning: 1000, fishing: 400, matches: (c) => matchGuardianWinds(c) },
+	{ name: "Dragon's Gates", winning: 1000, fishing: 400, matches: (c) => matchDragonsGates(c) },
+	{ name: "Dragon's Teeth", winning: 1000, fishing: 400, matches: (c) => matchDragonsTeeth(c) },
+	{ name: 'Yin Yang', winning: 1000, fishing: 400, matches: (c) => matchYinYang(c) },
+	{ name: 'Three Philosophers', winning: 1000, fishing: 400, matches: (c) => matchThreePhilosophers(c) },
+	// Chow Chow's shape is a stricter (all-one-suit, procedural) subset of Crazy Chows at the
+	// same score, so it's listed first to win the display-name tie when both match.
+	{ name: 'Chow Chow', winning: 500, fishing: 200, matches: (c, ctx) => matchChowChow(c, ctx) },
+	{ name: 'Crazy Chows', winning: 500, fishing: 200, matches: (c) => matchCrazyChows(c) },
+	{ name: 'Little Robert', winning: 500, fishing: 200, matches: (c) => matchLittleRobert(c) },
+	{ name: 'Chop Suey', winning: 1000, fishing: 400, matches: (c) => matchChopSuey(c) },
+	{ name: 'Chow Mien', winning: 1000, fishing: 400, matches: (c) => matchChowMien(c) },
+	{ name: 'Little Brother', winning: 500, fishing: 200, matches: (c, ctx) => matchLittleBrother(c, ctx) },
+	{ name: 'Apple Blossom', winning: 1000, fishing: 400, matches: (c) => matchAppleBlossom(c) },
+	{ name: 'The Professors', winning: 500, fishing: 200, matches: (c, ctx) => matchTheProfessors(c, ctx) },
+	{ name: 'Odds & Evens', winning: 1500, fishing: 600, matches: (c) => matchOddsAndEvens(c) },
+	{ name: 'Heads and Tails', winning: 1000, fishing: 400, matches: (c) => matchHeadsAndTails(c) },
+	{ name: 'Robin', winning: 500, fishing: 200, matches: (c) => matchRobin(c) },
+	{ name: 'All Pair Jade', winning: 1000, fishing: 400, matches: (c) => matchAllPairJade(c) },
+	{ name: 'Imperial Jade', winning: 2000, fishing: 800, matches: (c) => matchImperialJade(c) },
+	{ name: 'Lily of the Valley', winning: 2000, fishing: 800, matches: (c) => matchLilyOfTheValley(c) },
+	{ name: 'Red Lily', winning: 2000, fishing: 800, matches: (c) => matchRedLily(c) },
+	{ name: 'Royal Ruby', winning: 2000, fishing: 800, matches: (c) => matchRoyalRuby(c) },
+	{ name: 'Ruby Jade', winning: 1000, fishing: 400, matches: (c) => matchRubyJade(c) },
+	{ name: 'Lillypilly', winning: 1000, fishing: 400, matches: (c) => matchLillypilly(c) },
+	{ name: 'Blue Mountains', winning: 1000, fishing: 400, matches: (c) => matchBlueMountains(c) },
+	{ name: 'White Elephant', winning: 1000, fishing: 400, matches: (c) => matchWhiteElephant(c) },
+	{ name: 'Driven Snow', winning: 1000, fishing: 400, matches: (c) => matchDrivenSnow(c) },
+	{ name: "Dragon's Scales", winning: 1000, fishing: 400, matches: (c) => matchDragonsScales(c) },
+	{ name: 'Dragonette', winning: 1000, fishing: 400, matches: (c) => matchDragonette(c) },
+	{ name: "Dragon's Run", winning: 1500, fishing: 600, matches: (c) => matchDragonsRun(c) },
+	{ name: 'Sunrise', winning: 1000, fishing: 400, matches: (c) => matchSunrise(c) },
+	{ name: 'Sunset', winning: 1000, fishing: 400, matches: (c) => matchSunset(c) },
+	{ name: 'Numbers in Parallel', winning: 1500, fishing: 600, matches: (c) => matchNumbersInParallel(c) },
+	{ name: 'Numbers Doubled', winning: 1500, fishing: 600, matches: (c) => matchNumbersDoubled(c) },
+	{ name: 'Chinese Odds', winning: 1500, fishing: 600, matches: (c) => matchChineseOdds(c) },
+	{ name: 'Seven Twins', winning: 500, fishing: 200, matches: (c, ctx) => matchSevenTwins(c, ctx) },
+	{ name: 'Golden Gates', winning: 1000, fishing: 400, matches: (c) => matchGoldenGates(c) },
+	{ name: 'Windy Dragons', winning: 1000, fishing: 400, matches: (c) => matchWindyDragons(c) },
+	{ name: 'Windvane', winning: 1000, fishing: 400, matches: (c) => matchWindvane(c) },
+	{ name: 'Three Sisters', winning: 1000, fishing: 400, matches: (c) => matchWindyRank(c, 3) },
+	{ name: 'Seven Brothers', winning: 1000, fishing: 400, matches: (c) => matchWindyRank(c, 7) },
+	{ name: 'Civil War', winning: 1500, fishing: 600, matches: (c) => matchCivilWar(c) },
+	{ name: 'Up You Go', winning: 2000, fishing: 800, matches: (c, ctx) => matchUpYouGo(c, ctx) },
+	{ name: 'Down You Go', winning: 2000, fishing: 800, matches: (c, ctx) => matchDownYouGo(c, ctx) },
+	{ name: 'Red Waratah', winning: 1000, fishing: 400, matches: (c) => matchRedWaratah(c) },
+	{ name: 'All Winds and Dragons', winning: 1000, fishing: 400, matches: (c) => matchAllWindsAndDragons(c) }
+];
+
+// Normalizes a player's tiles (concealed hand + revealed meld tiles, kongs capped at 3
+// tiles so they behave like pungs) into a suit-rank tally for named-hand pattern matching.
+function specialHandTally(player, extraTile) {
+	const tiles = [...player.hand];
+	if (extraTile) tiles.push(extraTile);
+	for (const m of player.melds) tiles.push(...m.tiles.slice(0, 3));
+	return tallyCounts(tiles);
+}
+
+function handsListFor(handMode) {
+	return handMode === 'fullList' ? FULL_SPECIAL_HANDS : SPECIAL_HANDS;
+}
+
+function bestSpecialHandMatch(tally, ctx, handsList) {
+	let best = null;
+	for (const hand of handsList) {
+		if (hand.matches(cloneCounts(tally), ctx) && (!best || hand.winning > best.winning)) best = hand;
+	}
+	return best;
+}
+
+function bestSpecialHandFishingMatch(partialTally, ctx, handsList) {
+	let best = null;
+	for (const probe of ALL_TILE_KINDS) {
+		const key = `${probe.suit}-${probe.rank}`;
+		const trial = cloneCounts(partialTally);
+		trial[key] = (trial[key] || 0) + 1;
+		const match = bestSpecialHandMatch(trial, ctx, handsList);
+		if (match && (!best || match.fishing > best.fishing)) best = match;
+	}
+	return best;
+}
+
+// If a named hand's Winning score beats the ordinary calculation, use it instead — named
+// hands are absolute scores, not subject to the normal LIMIT cap. `ordinaryResult` is mined
+// for whether this was a self-draw / last-wall-tile win, since a few hands (e.g. Chow Chow)
+// require that.
+function applySpecialWinnerScore(player, winningTile, ordinaryResult, handMode) {
+	const tally = specialHandTally(player, winningTile);
+	const ctx = {
+		seatWind: player.seatWind,
+		player,
+		selfDraw: ordinaryResult.detail.some((d) => d.name === 'Drew winning tile from wall'),
+		wonWithLastWallTile: ordinaryResult.doubleDetail.some((d) => d.name === 'Won with last tile from wall')
+	};
+	const special = bestSpecialHandMatch(tally, ctx, handsListFor(handMode));
+	if (special && special.winning > ordinaryResult.cappedScore) {
+		return { ...ordinaryResult, cappedScore: special.winning, rawScore: special.winning, specialHand: special.name };
+	}
+	return ordinaryResult;
+}
+
+// A non-winner who's exactly one tile away from a named hand at hand-end collects its
+// Fishing score if that beats their ordinary (non-winning) score.
+function applySpecialFishingScore(player, ordinaryResult, handMode) {
+	const tally = specialHandTally(player, null);
+	const ctx = { seatWind: player.seatWind, player };
+	const special = bestSpecialHandFishingMatch(tally, ctx, handsListFor(handMode));
+	if (special && special.fishing > ordinaryResult.cappedScore) {
+		return { ...ordinaryResult, cappedScore: special.fishing, rawScore: special.fishing, specialHand: `${special.name} (fishing)` };
+	}
+	return ordinaryResult;
 }
 
 function findTileInHand(hand, suit, rank) {
@@ -435,6 +1993,7 @@ function getOrCreateGame(roomId) {
 			totalScores: {},
 			result: null,
 			dealerRetained: false,
+			handMode: 'shortList',
 			log: [],
 			chat: []
 		});
@@ -532,6 +2091,8 @@ function getStateForPlayer(game, playerId) {
 		isMyTurn,
 		turnPhase: game.turnPhase,
 		canDeclareSelfDrawWin: canWin,
+		myOriginalCallEligible: player.originalCallEligible,
+		myOriginalCallActive: player.originalCallActive,
 		availableConcealedKongs:
 			isMyTurn && game.turnPhase === 'awaitingDiscard' ? getConcealedKongOptions(player) : [],
 		availablePromotedKongs:
@@ -559,11 +2120,13 @@ function getStateForPlayer(game, playerId) {
 			isCurrent: game.status === 'playing' && currentPlayer(game)?.id === p.id,
 			disconnected: p.disconnected ?? false,
 			isDummy: p.isDummy ?? false,
+			originalCall: p.originalCallActive,
 			totalScore: game.totalScores[p.id] ?? 0
 		})),
 		dealerPlayerId: game.players[game.dealerIndex]?.id ?? null,
 		roundWind: game.roundWind,
 		handNumber: game.handNumber,
+		handMode: game.handMode,
 		wallCount: game.wall.length,
 		discards: game.discards,
 		result: game.result,
@@ -631,6 +2194,9 @@ function addPlayer(game, socket, playerName, playerId) {
 		assistMode: 'regular',
 		disconnected: false,
 		isDummy: false,
+		discardCount: 0,
+		originalCallEligible: false,
+		originalCallActive: false,
 		socket
 	});
 	if (game.totalScores[socket.id] === undefined) game.totalScores[socket.id] = 0;
@@ -731,6 +2297,9 @@ function dealHand(game) {
 		p.melds = [];
 		p.flowers = [];
 		p.seatWind = WIND_RANKS[(i - game.dealerIndex + 4) % 4];
+		p.discardCount = 0;
+		p.originalCallEligible = false;
+		p.originalCallActive = false;
 	}
 	for (let round = 0; round < 13; round++) {
 		for (const p of game.players) drawTileForPlayer(game, p);
@@ -759,13 +2328,18 @@ function addDummyPlayers(game) {
 			assistMode: 'regular',
 			disconnected: false,
 			isDummy: true,
+			discardCount: 0,
+			originalCallEligible: false,
+			originalCallActive: false,
 			socket: null
 		});
 	}
 	return dummyCount;
 }
 
-function startGame(game, socket, fillEmptySeats) {
+const HAND_MODES = ['beginner', 'shortList', 'fullList'];
+
+function startGame(game, socket, fillEmptySeats, handMode) {
 	if (game.status !== 'waiting') {
 		socket.emit('error', 'Game already started');
 		return;
@@ -782,6 +2356,7 @@ function startGame(game, socket, fillEmptySeats) {
 		const added = addDummyPlayers(game);
 		log(game, `Filled ${added} empty seat${added === 1 ? '' : 's'} with practice partners.`);
 	}
+	game.handMode = HAND_MODES.includes(handMode) ? handMode : 'shortList';
 	game.dealerIndex = 0;
 	game.handNumber = 1;
 	dealHand(game);
@@ -821,12 +2396,24 @@ function handleDraw(game, socket) {
 	broadcastState(game);
 }
 
+// Original Call: a player may declare it right after their first discard of the
+// hand if that leaves them calling (one tile from complete). If they never change
+// their hand again — always discarding exactly the tile they just drew, and never
+// claiming/konging — before going Mah-Jong, it's worth an extra double.
 function performDiscard(game, player, tileId) {
 	const idx = player.hand.findIndex((t) => t.id === tileId);
 	if (idx === -1) return;
+	const isFirstDiscard = player.discardCount === 0;
+	const handChanged = game.turnEntrySource !== 'draw' || tileId !== game.lastDrawnTileId;
+	player.discardCount += 1;
 	const [tile] = player.hand.splice(idx, 1);
 	game.discards.push({ tile, playerId: player.id });
 	log(game, `${player.name} discarded ${describeTile(tile)}`);
+	if (player.originalCallActive && handChanged) {
+		player.originalCallActive = false;
+		log(game, `${player.name}'s Original Call is broken`);
+	}
+	player.originalCallEligible = isFirstDiscard && isCallingHand(player);
 	openClaimWindow(game, tile, player.id);
 }
 
@@ -967,6 +2554,10 @@ function executePongKongClaim(game, pc, winnerId) {
 		claimedFrom: pc.discarderId
 	});
 	log(game, `${player.name} claimed ${response.type === 'kong' ? 'kong' : 'pong'} on ${describeTile(discard)}`);
+	if (player.originalCallActive) {
+		player.originalCallActive = false;
+		log(game, `${player.name}'s Original Call is broken`);
+	}
 	game.pendingClaim = null;
 	game.currentPlayerIndex = game.players.findIndex((p) => p.id === winnerId);
 	if (response.type === 'kong') {
@@ -996,6 +2587,10 @@ function executeChiClaim(game, pc, playerId) {
 	const meldTiles = [...usedTiles, discard].sort((a, b) => a.rank - b.rank);
 	player.melds.push({ type: 'chow', tiles: meldTiles, concealed: false, claimedFrom: pc.discarderId });
 	log(game, `${player.name} chi'd ${describeTile(discard)}`);
+	if (player.originalCallActive) {
+		player.originalCallActive = false;
+		log(game, `${player.name}'s Original Call is broken`);
+	}
 	game.pendingClaim = null;
 	game.currentPlayerIndex = game.players.findIndex((p) => p.id === playerId);
 	game.turnPhase = 'awaitingDiscard';
@@ -1017,6 +2612,10 @@ function handleDeclareConcealedKong(game, socket, suit, rank) {
 	}
 	player.melds.push({ type: 'kong', tiles: used, concealed: true, claimedFrom: null });
 	log(game, `${player.name} declared a concealed kong`);
+	if (player.originalCallActive) {
+		player.originalCallActive = false;
+		log(game, `${player.name}'s Original Call is broken`);
+	}
 	const drew = drawTileForPlayer(game, player);
 	if (!drew) return endHandDraw(game);
 	game.turnEntrySource = 'draw';
@@ -1038,10 +2637,24 @@ function handleDeclarePromotedKong(game, socket, meldIndex) {
 	meld.type = 'kong';
 	meld.promoted = true;
 	log(game, `${player.name} promoted a pung to a kong`);
+	if (player.originalCallActive) {
+		player.originalCallActive = false;
+		log(game, `${player.name}'s Original Call is broken`);
+	}
 	const drew = drawTileForPlayer(game, player);
 	if (!drew) return endHandDraw(game);
 	game.turnEntrySource = 'draw';
 	game.lastDrawnTileId = drew.id;
+	broadcastState(game);
+}
+
+function handleDeclareOriginalCall(game, socket) {
+	const player = game.players.find((p) => p.id === socket.id);
+	if (!player) return;
+	if (!player.originalCallEligible) return socket.emit('error', 'Cannot declare Original Call now');
+	player.originalCallEligible = false;
+	player.originalCallActive = true;
+	log(game, `${player.name} declared an Original Call`);
 	broadcastState(game);
 }
 
@@ -1091,7 +2704,13 @@ function endHand(game, { winnerId, winnerResult, selfDraw, discarderId, winningT
 	const scores = {};
 	const scoreResults = {};
 	for (const p of game.players) {
-		const result = p.id === winnerId ? winnerResult : computeHandScore(game, p, { isWinner: false });
+		let result = p.id === winnerId ? winnerResult : computeHandScore(game, p, { isWinner: false });
+		if (game.handMode !== 'beginner') {
+			result =
+				p.id === winnerId
+					? applySpecialWinnerScore(p, winningTile, result, game.handMode)
+					: applySpecialFishingScore(p, result, game.handMode);
+		}
 		scores[p.id] = result.cappedScore;
 		scoreResults[p.id] = result;
 	}
@@ -1122,6 +2741,7 @@ function endHand(game, { winnerId, winnerResult, selfDraw, discarderId, winningT
 			rawScore: scoreResults[p.id].rawScore,
 			detail: scoreResults[p.id].detail,
 			doubleDetail: scoreResults[p.id].doubleDetail,
+			specialHand: scoreResults[p.id].specialHand ?? null,
 			payment: payments[p.id]
 		})),
 		revealedHands: revealedHands(game)
@@ -1148,10 +2768,10 @@ export default function injectSocketIO(server) {
 			const game = roomId && games.get(roomId);
 			if (game) removePlayer(game, socket, targetPlayerId);
 		});
-		socket.on('start', ({ fillEmptySeats } = {}) => {
+		socket.on('start', ({ fillEmptySeats, handMode } = {}) => {
 			const roomId = socketRoom.get(socket.id);
 			const game = roomId && games.get(roomId);
-			if (game) startGame(game, socket, !!fillEmptySeats);
+			if (game) startGame(game, socket, !!fillEmptySeats, handMode);
 		});
 		socket.on('draw', () => {
 			const roomId = socketRoom.get(socket.id);
@@ -1182,6 +2802,11 @@ export default function injectSocketIO(server) {
 			const roomId = socketRoom.get(socket.id);
 			const game = roomId && games.get(roomId);
 			if (game) handleWinSelfDraw(game, socket);
+		});
+		socket.on('declareOriginalCall', () => {
+			const roomId = socketRoom.get(socket.id);
+			const game = roomId && games.get(roomId);
+			if (game) handleDeclareOriginalCall(game, socket);
 		});
 		socket.on('setAssistMode', ({ mode }) => {
 			const roomId = socketRoom.get(socket.id);
