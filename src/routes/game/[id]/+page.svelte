@@ -9,6 +9,7 @@
 	import type { Socket } from 'socket.io-client';
 
 	type AssistMode = 'regular' | 'hint' | 'learning';
+	type HandMode = 'beginner' | 'shortList' | 'fullList';
 
 	type Meld = { type: 'chow' | 'pung' | 'kong'; tiles: TileT[]; concealed: boolean; claimedFrom: string | null; promoted?: boolean };
 
@@ -24,6 +25,7 @@
 		isCurrent: boolean;
 		disconnected: boolean;
 		isDummy: boolean;
+		originalCall: boolean;
 		totalScore: number;
 	};
 
@@ -49,6 +51,7 @@
 		rawScore: number;
 		detail: ScoreDetail[];
 		doubleDetail: DoubleDetail[];
+		specialHand: string | null;
 		payment: number;
 	};
 
@@ -82,6 +85,8 @@
 		isMyTurn: boolean;
 		turnPhase: 'awaitingDraw' | 'awaitingDiscard' | 'awaitingClaims';
 		canDeclareSelfDrawWin: boolean;
+		myOriginalCallEligible: boolean;
+		myOriginalCallActive: boolean;
 		availableConcealedKongs: { suit: string; rank: number | string }[];
 		availablePromotedKongs: { meldIndex: number; suit: string; rank: number | string }[];
 		pendingClaim: PendingClaim | null;
@@ -89,6 +94,7 @@
 		dealerPlayerId: string | null;
 		roundWind: WindRank;
 		handNumber: number;
+		handMode: HandMode;
 		wallCount: number;
 		discards: { tile: TileT; playerId: string }[];
 		result: HandResult | null;
@@ -114,6 +120,7 @@
 	let showDiscardHint = $state(false);
 	let showClaimHint = $state(false);
 	let fillEmptySeats = $state(false);
+	let handMode: HandMode = $state('shortList');
 
 	let myMeldsNeeded = $derived.by(() => {
 		const g = gameState;
@@ -199,8 +206,14 @@
 	});
 
 	function start() {
-		client?.emit('start', { fillEmptySeats });
+		client?.emit('start', { fillEmptySeats, handMode });
 	}
+
+	const HAND_MODE_INFO: Record<HandMode, { label: string; description: string }> = {
+		beginner: { label: 'Beginner', description: 'Just the standard basic-score-times-doubles scoring — no named hands.' },
+		shortList: { label: 'Short List', description: "Adds ~25 named hands from the book's Short List, each with its own fixed score that can beat the usual 1000-point limit." },
+		fullList: { label: 'Full List', description: "The book's full synopsis of special hands — about 80 named hands, each with its own fixed score that can beat the usual 1000-point limit." }
+	};
 
 	function removePlayerAction(targetPlayerId: string) {
 		client?.emit('removePlayer', { targetPlayerId });
@@ -232,6 +245,10 @@
 
 	function winSelfDraw() {
 		client?.emit('winSelfDraw');
+	}
+
+	function declareOriginalCall() {
+		client?.emit('declareOriginalCall');
 	}
 
 	function nextHand() {
@@ -411,6 +428,18 @@
 						{/each}
 					</ul>
 				</div>
+				<div class="mb-5">
+					<p class="text-sm text-emerald-100 mb-2">Hand rules</p>
+					<div class="flex rounded-lg overflow-hidden border border-white/10 text-xs mx-auto w-fit">
+						{#each Object.entries(HAND_MODE_INFO) as [mode, info]}
+							<button
+								onclick={() => (handMode = mode as HandMode)}
+								class="px-3 py-1.5 transition-colors touch-manipulation {handMode === mode ? 'bg-sky-600 text-white' : 'bg-black/20 text-emerald-200 hover:bg-black/30'}"
+							>{info.label}</button>
+						{/each}
+					</div>
+					<p class="text-xs text-emerald-200/60 mt-2 max-w-xs mx-auto">{HAND_MODE_INFO[handMode].description}</p>
+				</div>
 				{#if gameState.players.length === 4}
 					<button onclick={start} class="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg font-semibold shadow transition-colors touch-manipulation">
 						Start game
@@ -447,6 +476,7 @@
 				<span>{windLabel(gameState.roundWind)} round</span>
 				<span>Dealer: {playerNameById(gameState.dealerPlayerId)}</span>
 				<span>Wall: {gameState.wallCount} tiles</span>
+				<span>{HAND_MODE_INFO[gameState.handMode].label} rules</span>
 			</div>
 
 			<!-- opponents -->
@@ -458,6 +488,7 @@
 							<div class="flex items-center gap-1 flex-wrap">
 								{#if player.seatWind}<span class="text-xs bg-slate-600/50 px-1.5 py-0.5 rounded">{player.seatWind}</span>{/if}
 								{#if player.isDealer}<span class="text-xs bg-yellow-500/30 text-yellow-200 px-1.5 py-0.5 rounded">Dealer</span>{/if}
+								{#if player.originalCall}<span class="text-xs bg-amber-500/30 text-amber-200 px-1.5 py-0.5 rounded">📣 Original Call</span>{/if}
 								{#if player.isDummy}<span class="text-xs bg-slate-500/30 text-slate-300 px-1.5 py-0.5 rounded">🤖 Practice</span>{/if}
 								{#if player.disconnected}<span class="text-xs bg-red-500/30 text-red-300 px-1.5 py-0.5 rounded">Away</span>{/if}
 								{#if modeLabel(player.assistMode)}<span class="text-xs bg-sky-500/20 text-sky-200 px-1.5 py-0.5 rounded">{modeLabel(player.assistMode)}</span>{/if}
@@ -552,8 +583,9 @@
 			<!-- my area -->
 			<div class="w-full max-w-3xl mt-auto flex flex-col items-center gap-2 bg-black/20 rounded-xl p-3">
 				<div class="flex items-center justify-between w-full flex-wrap gap-1">
-					<h3 class="font-bold text-sm">
+					<h3 class="font-bold text-sm flex items-center gap-1.5">
 						You{gameState.mySeatWind ? ` (${gameState.mySeatWind})` : ''}
+						{#if gameState.myOriginalCallActive}<span class="text-xs bg-amber-500/30 text-amber-200 px-1.5 py-0.5 rounded">📣 Original Call</span>{/if}
 					</h3>
 					<div class="flex items-center gap-2">
 						<span class="text-xs text-emerald-200">{gameState.players.find((p) => p.id === gameState!.myPlayerId)?.totalScore ?? 0} pts</span>
@@ -631,6 +663,9 @@
 					{#if gameState.canDeclareSelfDrawWin}
 						<button onclick={winSelfDraw} class="px-5 py-2.5 bg-red-600 hover:bg-red-500 rounded-lg font-bold shadow animate-pulse transition-colors touch-manipulation">Win! (self-draw)</button>
 					{/if}
+					{#if gameState.myOriginalCallEligible}
+						<button onclick={declareOriginalCall} class="px-4 py-2.5 bg-amber-600 hover:bg-amber-500 rounded-lg font-semibold shadow transition-colors touch-manipulation">📣 Declare Original Call</button>
+					{/if}
 					{#each gameState.availableConcealedKongs as k}
 						<button onclick={() => declareConcealedKong(k.suit, k.rank)} class="px-3 py-2 bg-purple-600 hover:bg-purple-500 rounded-lg text-sm font-semibold transition-colors touch-manipulation">
 							Kong {tileName({ suit: k.suit, rank: k.rank } as TileT)}
@@ -706,9 +741,13 @@
 								{s.payment > 0 ? '+' : ''}{s.payment}
 							</span>
 						</div>
-						<p class="text-xs text-slate-300 mt-1">
-							Score: {s.basic} basic{s.doubles > 0 ? ` × 2^${s.doubles}` : ''} = {s.rawScore}{s.rawScore !== s.score ? ` (capped at ${s.score})` : ''}
-						</p>
+						{#if s.specialHand}
+							<p class="text-xs text-amber-300 mt-1 font-semibold">🏆 Named hand: {s.specialHand} — {s.score} points</p>
+						{:else}
+							<p class="text-xs text-slate-300 mt-1">
+								Score: {s.basic} basic{s.doubles > 0 ? ` × 2^${s.doubles}` : ''} = {s.rawScore}{s.rawScore !== s.score ? ` (capped at ${s.score})` : ''}
+							</p>
+						{/if}
 						<div class="text-xs text-slate-400 mt-1">
 							{#each s.detail as d}
 								<span class="inline-block bg-black/30 rounded px-1.5 py-0.5 m-0.5">{d.name} +{d.value}</span>
@@ -775,13 +814,20 @@
 				<li>Winner only: all 1s, 9s, winds and dragons</li>
 				<li>Winner only: fully concealed hand</li>
 				<li>Winner only: won with the last tile from the wall, or the final discard</li>
+				<li>Winner only: an unbroken Original Call (see below)</li>
 			</ul>
 			<p class="mt-2 text-slate-300 text-xs">Score is capped at a limit of 1000 points.</p>
+
+			<p class="font-semibold text-slate-100 mt-3 mb-1">📣 Original Call</p>
+			<p class="text-slate-300 text-xs">Right after your first discard, if that leaves you calling (one tile from Mah-Jong), you may declare an Original Call. Keep your hand exactly as it is — always discarding the tile you just drew, never claiming or konging — all the way to Mah-Jong, and it's worth an extra double. Change your hand in any way and the call is broken (no penalty, you just lose the bonus).</p>
 
 			<p class="font-semibold text-slate-100 mt-3 mb-1">Settling up</p>
 			<p class="text-slate-300 text-xs">The winner collects their full score from each of the other three players. If nobody wins (wall exhausted), all four players instead settle the <em>difference</em> between their own scores with each other. Any payment to or from East Wind is doubled.</p>
 
-			<p class="mt-3 text-amber-200/80 text-xs">Not yet implemented: "fishing" (calling-hand) bonuses, robbing the kong, and the book's ~150 named special hands — those score via this same basic system for now.</p>
+			<p class="font-semibold text-slate-100 mt-3 mb-1">🏆 Named hands</p>
+			<p class="text-slate-300 text-xs">Set by whoever starts the table, under "Hand rules": <strong>Beginner</strong> is just the scoring above with no named hands. <strong>Short List</strong> adds about 35 named hands from the book's beginner-friendly short list (Wriggly Snake, Four Blessings, Unique Wonder, and so on), each with its own fixed score that can beat — and isn't capped by — the usual limit of 1000. <strong>Full List</strong> adds the book's complete synopsis of special hands, around 80 in total. If you go Mah-Jong holding a named hand, its Winning score is used automatically; if the hand ends and you weren't the winner but were exactly one tile from completing one, you collect its (lower) Fishing score instead of your ordinary score.</p>
+
+			<p class="mt-3 text-amber-200/80 text-xs">Not yet implemented: general "fishing" (calling-hand) declarations outside of named hands, and robbing the kong.</p>
 			<button onclick={() => (showRules = false)} class="mt-4 w-full py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg font-semibold transition-colors touch-manipulation">Got it</button>
 		</div>
 	</div>

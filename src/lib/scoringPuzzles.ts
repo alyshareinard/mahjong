@@ -127,8 +127,8 @@ export const scoringPuzzles: ScoringPuzzle[] = [
 		blurb: "This is the exact hand from The Mah Jong Player's Companion's own worked example (p.24) — West went Mah-Jong, self-drawn, in a South round. See how many doubles you can find.",
 		melds: [pung('characters', 6, false), pung('dragon', 'white', false), pung('characters', 9, true), pung('wind', 'S', false)],
 		pairTiles: pair('dragon', 'red'),
-		flowers: [flowerTile('flower', 3), flowerTile('season', 3)],
-		seatWind: 'S',
+		flowers: [flowerTile('flower', 3), flowerTile('season', 4)],
+		seatWind: 'W',
 		roundWind: 'S',
 		selfDraw: true
 	}
