@@ -1734,93 +1734,587 @@ function distanceAllWindsAndDragons(counts) {
 }
 
 const SPECIAL_HANDS = [
-	{ name: 'Wriggly Snake', winning: 1000, fishing: 400, distance: (c) => distanceWrigglySnake(c) },
-	{ name: 'Run, Pung & Pair', winning: 1000, fishing: 400, distance: (c) => distanceRunPungPair(c) },
-	{ name: "Greta's Garden", winning: 1000, fishing: 400, distance: (c) => distanceGretasGarden(c) },
-	{ name: "Greta's Dragon", winning: 1000, fishing: 400, distance: (c) => distanceGretasDragon(c) },
-	{ name: "Gertie's Garter", winning: 1000, fishing: 400, distance: (c) => distanceGertiesGarter(c) },
-	{ name: 'Red Lantern', winning: 2000, fishing: 800, distance: (c, ctx) => distanceRedLantern(c, ctx) },
-	{ name: 'Gates of Heaven', winning: 1000, fishing: 400, distance: (c) => distanceGatesOfHeaven(c) },
-	{ name: 'Confused Gates', winning: 1000, fishing: 400, distance: (c) => distanceConfusedGates(c) },
-	{ name: 'Windy Chow', winning: 500, fishing: 200, distance: (c) => distanceWindyChow(c) },
-	{ name: 'Big Robert', winning: 500, fishing: 200, distance: (c) => distanceBigRobert(c) },
-	{ name: 'Moon at Bottom of Well', winning: 1000, fishing: 400, distance: (c) => distanceMoonAtBottomOfWell(c) },
-	{ name: 'Knitting', winning: 500, fishing: 200, distance: (c) => distanceKnitting(c) },
-	{ name: 'Triple Knitting', winning: 500, fishing: 200, distance: (c) => distanceTripleKnitting(c) },
-	{ name: 'All Pair', winning: 500, fishing: 200, distance: (c) => distanceAllPair(c) },
-	{ name: 'All Pair Honours', winning: 1000, fishing: 400, distance: (c) => distanceAllPairHonours(c) },
-	{ name: 'Heavenly Twins', winning: 1000, fishing: 400, distance: (c) => distanceHeavenlyTwins(c) },
-	{ name: 'Windfall', winning: 1000, fishing: 400, distance: (c) => distanceWindfall(c) },
-	{ name: 'All Pair Ruby Jade', winning: 1000, fishing: 400, distance: (c) => distanceAllPairRubyJade(c) },
-	{ name: "Sparrow's Sanctuary", winning: 1500, fishing: 600, distance: (c) => distanceSparrowsSanctuary(c) },
-	{ name: 'Windy Ones', winning: 1000, fishing: 400, distance: (c) => distanceWindyRank(c, 1) },
-	{ name: 'Windy Nines', winning: 1000, fishing: 400, distance: (c) => distanceWindyRank(c, 9) },
-	{ name: 'Hachi Ban', winning: 1000, fishing: 400, distance: (c) => distanceHachiBan(c) },
-	{ name: 'Four Blessings', winning: 1500, fishing: 600, distance: (c) => distanceFourBlessings(c) },
-	{ name: 'Grand Sequence', winning: 1000, fishing: 400, distance: (c) => distanceGrandSequence(c) },
-	{ name: 'Dragonfly', winning: 1000, fishing: 400, distance: (c) => distanceDragonfly(c) },
-	{ name: "Dragon's Breath", winning: 1000, fishing: 400, distance: (c) => distanceDragonsBreath(c) },
-	{ name: 'Wriggly Dragon', winning: 1000, fishing: 400, distance: (c) => distanceWrigglyDragon(c) },
-	{ name: 'Green Jade', winning: 1000, fishing: 400, distance: (c) => distanceColorDragonSuitHand(c, 'green', 'bamboo') },
-	{ name: 'Red Coral', winning: 1000, fishing: 400, distance: (c) => distanceColorDragonSuitHand(c, 'red', 'characters') },
-	{ name: 'White Opal', winning: 1000, fishing: 400, distance: (c) => distanceColorDragonSuitHand(c, 'white', 'dots') },
-	{ name: 'Guardian Dragon', winning: 1000, fishing: 400, distance: (c) => distanceGuardianDragon(c) },
-	{ name: 'Three Great Scholars', winning: 1500, fishing: 600, distance: (c) => distanceThreeGreatScholars(c) },
-	{ name: 'Unique Wonder', winning: 2000, fishing: 800, distance: (c) => distanceUniqueWonder(c) },
-	{ name: 'Five Odd Honours', winning: 500, fishing: 200, distance: (c) => distanceFiveOddHonours(c) },
-	{ name: "Dragon's Tail", winning: 1000, fishing: 400, distance: (c) => distanceDragonsTail(c) },
-	{ name: 'Hovering Angel', winning: 1000, fishing: 400, distance: (c, ctx) => distanceHoveringAngel(c, ctx) }
+	{
+		name: 'Wriggly Snake',
+		winning: 1000,
+		fishing: 400,
+		description: 'A run of 1-9 in one suit, plus one of each Wind, with one of those 13 tiles doubled.',
+		distance: (c) => distanceWrigglySnake(c)
+	},
+	{
+		name: 'Run, Pung & Pair',
+		winning: 1000,
+		fishing: 400,
+		description: 'A run of 1-9 in one suit, plus a pung of one of those numbers and a pair of another, all the same suit.',
+		distance: (c) => distanceRunPungPair(c)
+	},
+	{
+		name: "Greta's Garden",
+		winning: 1000,
+		fishing: 400,
+		description: 'A chow-run of 1-7 in one suit, plus one of each Wind and one of each Dragon.',
+		distance: (c) => distanceGretasGarden(c)
+	},
+	{
+		name: "Greta's Dragon",
+		winning: 1000,
+		fishing: 400,
+		description: 'A chow-run of 1-7 in one suit, plus one of each Wind and a pung of one Dragon.',
+		distance: (c) => distanceGretasDragon(c)
+	},
+	{
+		name: "Gertie's Garter",
+		winning: 1000,
+		fishing: 400,
+		description: 'A chow-run of 1-7 in one suit and another chow-run of 1-7 in a different suit.',
+		distance: (c) => distanceGertiesGarter(c)
+	},
+	{
+		name: 'Red Lantern',
+		winning: 2000,
+		fishing: 800,
+		description: 'A chow-run of 1-7 in one suit, plus a pung of your own Wind and a pung of Red Dragon.',
+		distance: (c, ctx) => distanceRedLantern(c, ctx)
+	},
+	{
+		name: 'Gates of Heaven',
+		winning: 1000,
+		fishing: 400,
+		description: 'A chow-run of 2-8 in one suit, plus a pung of 1s and a pung of 9s in that same suit.',
+		distance: (c) => distanceGatesOfHeaven(c)
+	},
+	{
+		name: 'Confused Gates',
+		winning: 1000,
+		fishing: 400,
+		description: 'A chow-run of 2-8 in one suit, plus a pung of 1s and a pung of 9s, each in a different suit.',
+		distance: (c) => distanceConfusedGates(c)
+	},
+	{
+		name: 'Windy Chow',
+		winning: 500,
+		fishing: 200,
+		description: 'A chow in each of the three suits, plus one of each Wind, with one Wind doubled.',
+		distance: (c) => distanceWindyChow(c)
+	},
+	{
+		name: 'Big Robert',
+		winning: 500,
+		fishing: 200,
+		description: '(Best-effort reading, unconfirmed) A run of four consecutive numbers in each suit, plus a pair of a Wind or Dragon.',
+		distance: (c) => distanceBigRobert(c)
+	},
+	{
+		name: 'Moon at Bottom of Well',
+		winning: 1000,
+		fishing: 400,
+		description: 'A run of 1-9 in Dots, plus one more chow and a pair, all in Dots.',
+		distance: (c) => distanceMoonAtBottomOfWell(c)
+	},
+	{
+		name: 'Knitting',
+		winning: 500,
+		fishing: 200,
+		description: 'Seven pairs of the same seven numbers, confined to two suits (each individual pair same-suited).',
+		distance: (c) => distanceKnitting(c)
+	},
+	{
+		name: 'Triple Knitting',
+		winning: 500,
+		fishing: 200,
+		description: 'Four numbers, each held once in all three suits, plus a same-suit pair of a fifth number.',
+		distance: (c) => distanceTripleKnitting(c)
+	},
+	{
+		name: 'All Pair',
+		winning: 500,
+		fishing: 200,
+		description: 'Seven pairs of any tiles (Seven Pairs).',
+		distance: (c) => distanceAllPair(c)
+	},
+	{
+		name: 'All Pair Honours',
+		winning: 1000,
+		fishing: 400,
+		description: 'Seven pairs, each a Wind, Dragon, or a suit terminal (1 or 9).',
+		distance: (c) => distanceAllPairHonours(c)
+	},
+	{
+		name: 'Heavenly Twins',
+		winning: 1000,
+		fishing: 400,
+		description: 'Seven pairs, all in one suit.',
+		distance: (c) => distanceHeavenlyTwins(c)
+	},
+	{
+		name: 'Windfall',
+		winning: 1000,
+		fishing: 400,
+		description: 'One of each Wind, plus five pairs of numbers in one suit.',
+		distance: (c) => distanceWindfall(c)
+	},
+	{
+		name: 'All Pair Ruby Jade',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pair of Green Dragon, a pair of Red Dragon, and five pairs from the red/green Bamboo numbers (1,2,3,4,5,6,7,8,9).',
+		distance: (c) => distanceAllPairRubyJade(c)
+	},
+	{
+		name: "Sparrow's Sanctuary",
+		winning: 1500,
+		fishing: 600,
+		description: 'A kong of Bamboo 1s, plus a pair of each green Bamboo number (2, 3, 4, 6, 8).',
+		distance: (c) => distanceSparrowsSanctuary(c)
+	},
+	{
+		name: 'Windy Ones',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pung of 1s in each of the three suits, plus one of each Wind, with one Wind doubled.',
+		distance: (c) => distanceWindyRank(c, 1)
+	},
+	{
+		name: 'Windy Nines',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pung of 9s in each of the three suits, plus one of each Wind, with one Wind doubled.',
+		distance: (c) => distanceWindyRank(c, 9)
+	},
+	{
+		name: 'Hachi Ban',
+		winning: 1000,
+		fishing: 400,
+		description:
+			'A run of 1-8 or 2-9 in one suit, plus a pair of each remaining Wind (three pairs) or a pair of each Dragon (three pairs).',
+		distance: (c) => distanceHachiBan(c)
+	},
+	{
+		name: 'Four Blessings',
+		winning: 1500,
+		fishing: 600,
+		description: 'A pung of each of the four Winds, plus any pair.',
+		distance: (c) => distanceFourBlessings(c)
+	},
+	{
+		name: 'Grand Sequence',
+		winning: 1000,
+		fishing: 400,
+		description: 'A run of 1-9 in one suit, plus a pung of a Wind or Dragon and a pair in any suit.',
+		distance: (c) => distanceGrandSequence(c)
+	},
+	{
+		name: 'Dragonfly',
+		winning: 1000,
+		fishing: 400,
+		description: 'One of each Dragon, plus a pung in each of the three suits and a pair in any suit.',
+		distance: (c) => distanceDragonfly(c)
+	},
+	{
+		name: "Dragon's Breath",
+		winning: 1000,
+		fishing: 400,
+		description: 'One of each Dragon with one doubled, plus five pairs of numbers in one suit.',
+		distance: (c) => distanceDragonsBreath(c)
+	},
+	{
+		name: 'Wriggly Dragon',
+		winning: 1000,
+		fishing: 400,
+		description: 'A run of 1-9 in one suit, plus one of each Dragon with one Dragon tripled into a pung.',
+		distance: (c) => distanceWrigglyDragon(c)
+	},
+	{
+		name: 'Green Jade',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pung of Green Dragon, plus three pungs and a pair, all in Bamboo.',
+		distance: (c) => distanceColorDragonSuitHand(c, 'green', 'bamboo')
+	},
+	{
+		name: 'Red Coral',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pung of Red Dragon, plus three pungs and a pair, all in Characters.',
+		distance: (c) => distanceColorDragonSuitHand(c, 'red', 'characters')
+	},
+	{
+		name: 'White Opal',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pung of White Dragon, plus three pungs and a pair, all in Dots.',
+		distance: (c) => distanceColorDragonSuitHand(c, 'white', 'dots')
+	},
+	{
+		name: 'Guardian Dragon',
+		winning: 1000,
+		fishing: 400,
+		description: 'A run of 1-9 in one suit, plus a pung of one Dragon and a pair of a different Dragon.',
+		distance: (c) => distanceGuardianDragon(c)
+	},
+	{
+		name: 'Three Great Scholars',
+		winning: 1500,
+		fishing: 600,
+		description: 'A pung of each of the three Dragons, plus a chow or pung and a pair, any suit.',
+		distance: (c) => distanceThreeGreatScholars(c)
+	},
+	{
+		name: 'Unique Wonder',
+		winning: 2000,
+		fishing: 800,
+		description: 'One of each Wind, each Dragon, and each suit terminal (1 and 9 in all three suits), with one of those 13 tiles doubled.',
+		distance: (c) => distanceUniqueWonder(c)
+	},
+	{
+		name: 'Five Odd Honours',
+		winning: 500,
+		fishing: 200,
+		description: 'A run of 1-9 in one suit, plus five different Winds/Dragons.',
+		distance: (c) => distanceFiveOddHonours(c)
+	},
+	{
+		name: "Dragon's Tail",
+		winning: 1000,
+		fishing: 400,
+		description: 'A run of 1-9 in one suit, plus a pung of a Dragon and a pair of a Wind (or a pung of a Wind and a pair of a Dragon).',
+		distance: (c) => distanceDragonsTail(c)
+	},
+	{
+		name: 'Hovering Angel',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pung of your own seat Wind, plus a chow in each of the three suits and a pair of any Dragon.',
+		distance: (c, ctx) => distanceHoveringAngel(c, ctx)
+	}
 ];
 
 const FULL_SPECIAL_HANDS = [
 	...SPECIAL_HANDS,
-	{ name: 'Guardian Winds', winning: 1000, fishing: 400, distance: (c) => distanceGuardianWinds(c) },
-	{ name: "Dragon's Gates", winning: 1000, fishing: 400, distance: (c) => distanceDragonsGates(c) },
-	{ name: "Dragon's Teeth", winning: 1000, fishing: 400, distance: (c) => distanceDragonsTeeth(c) },
-	{ name: 'Yin Yang', winning: 1000, fishing: 400, distance: (c) => distanceYinYang(c) },
-	{ name: 'Three Philosophers', winning: 1000, fishing: 400, distance: (c) => distanceThreePhilosophers(c) },
+	{
+		name: 'Guardian Winds',
+		winning: 1000,
+		fishing: 400,
+		description: 'A run of 1-9 in one suit, plus a pung of one Wind and a pair of a different Wind.',
+		distance: (c) => distanceGuardianWinds(c)
+	},
+	{
+		name: "Dragon's Gates",
+		winning: 1000,
+		fishing: 400,
+		description:
+			'A chow-run of 2-8 in one suit, plus a pung of that suit\'s matching terminal (1 or 9) and a pung of its matching Dragon (Characters-Red, Bamboo-Green, Dots-White).',
+		distance: (c) => distanceDragonsGates(c)
+	},
+	{
+		name: "Dragon's Teeth",
+		winning: 1000,
+		fishing: 400,
+		description: 'A chow-run of seven consecutive numbers in Characters or Dots, plus a pung of Red Dragon and a pung of White Dragon.',
+		distance: (c) => distanceDragonsTeeth(c)
+	},
+	{
+		name: 'Yin Yang',
+		winning: 1000,
+		fishing: 400,
+		description: 'The tiles 1,1,2,3,4,5,5 in one suit and 5,5,6,7,8,9,9 in a different suit.',
+		distance: (c) => distanceYinYang(c)
+	},
+	{
+		name: 'Three Philosophers',
+		winning: 1000,
+		fishing: 400,
+		description: 'A chow in each of the three suits, plus one more chow (or pung) and a pair, any suit.',
+		distance: (c) => distanceThreePhilosophers(c)
+	},
 	// Chow Chow's shape is a stricter (all-one-suit, procedural) subset of Crazy Chows at the
 	// same score, so it's listed first to win the display-name tie when both match.
-	{ name: 'Chow Chow', winning: 500, fishing: 200, distance: (c, ctx, max) => distanceChowChow(c, ctx, max) },
-	{ name: 'Crazy Chows', winning: 500, fishing: 200, distance: (c, ctx, max) => distanceCrazyChows(c, ctx, max) },
-	{ name: 'Little Robert', winning: 500, fishing: 200, distance: (c) => distanceLittleRobert(c) },
-	{ name: 'Chop Suey', winning: 1000, fishing: 400, distance: (c) => distanceChopSuey(c) },
-	{ name: 'Chow Mien', winning: 1000, fishing: 400, distance: (c) => distanceChowMien(c) },
-	{ name: 'Little Brother', winning: 500, fishing: 200, distance: (c, ctx) => distanceLittleBrother(c, ctx) },
-	{ name: 'Apple Blossom', winning: 1000, fishing: 400, distance: (c, ctx, max) => distanceAppleBlossom(c, ctx, max) },
-	{ name: 'The Professors', winning: 500, fishing: 200, distance: (c, ctx, max) => distanceTheProfessors(c, ctx, max) },
-	{ name: 'Odds & Evens', winning: 1500, fishing: 600, distance: (c) => distanceOddsAndEvens(c) },
-	{ name: 'Heads and Tails', winning: 1000, fishing: 400, distance: (c) => distanceHeadsAndTails(c) },
-	{ name: 'Robin', winning: 500, fishing: 200, distance: (c) => distanceRobin(c) },
-	{ name: 'All Pair Jade', winning: 1000, fishing: 400, distance: (c) => distanceAllPairJade(c) },
-	{ name: 'Imperial Jade', winning: 2000, fishing: 800, distance: (c, ctx, max) => distanceImperialJade(c, ctx, max) },
-	{ name: 'Lily of the Valley', winning: 2000, fishing: 800, distance: (c) => distanceLilyOfTheValley(c) },
-	{ name: 'Red Lily', winning: 2000, fishing: 800, distance: (c) => distanceRedLily(c) },
-	{ name: 'Royal Ruby', winning: 2000, fishing: 800, distance: (c) => distanceRoyalRuby(c) },
-	{ name: 'Ruby Jade', winning: 1000, fishing: 400, distance: (c) => distanceRubyJade(c) },
-	{ name: 'Lillypilly', winning: 1000, fishing: 400, distance: (c) => distanceLillypilly(c) },
-	{ name: 'Blue Mountains', winning: 1000, fishing: 400, distance: (c) => distanceBlueMountains(c) },
-	{ name: 'White Elephant', winning: 1000, fishing: 400, distance: (c) => distanceWhiteElephant(c) },
-	{ name: 'Driven Snow', winning: 1000, fishing: 400, distance: (c) => distanceDrivenSnow(c) },
-	{ name: "Dragon's Scales", winning: 1000, fishing: 400, distance: (c) => distanceDragonsScales(c) },
-	{ name: 'Dragonette', winning: 1000, fishing: 400, distance: (c) => distanceDragonette(c) },
-	{ name: "Dragon's Run", winning: 1500, fishing: 600, distance: (c) => distanceDragonsRun(c) },
-	{ name: 'Sunrise', winning: 1000, fishing: 400, distance: (c) => distanceSunrise(c) },
-	{ name: 'Sunset', winning: 1000, fishing: 400, distance: (c) => distanceSunset(c) },
-	{ name: 'Numbers in Parallel', winning: 1500, fishing: 600, distance: (c) => distanceNumbersInParallel(c) },
-	{ name: 'Numbers Doubled', winning: 1500, fishing: 600, distance: (c) => distanceNumbersDoubled(c) },
-	{ name: 'Chinese Odds', winning: 1500, fishing: 600, distance: (c) => distanceChineseOdds(c) },
-	{ name: 'Seven Twins', winning: 500, fishing: 200, distance: (c, ctx) => distanceSevenTwins(c, ctx) },
-	{ name: 'Golden Gates', winning: 1000, fishing: 400, distance: (c) => distanceGoldenGates(c) },
-	{ name: 'Windy Dragons', winning: 1000, fishing: 400, distance: (c) => distanceWindyDragons(c) },
-	{ name: 'Windvane', winning: 1000, fishing: 400, distance: (c) => distanceWindvane(c) },
-	{ name: 'Three Sisters', winning: 1000, fishing: 400, distance: (c) => distanceWindyRank(c, 3) },
-	{ name: 'Seven Brothers', winning: 1000, fishing: 400, distance: (c) => distanceWindyRank(c, 7) },
-	{ name: 'Civil War', winning: 1500, fishing: 600, distance: (c) => distanceCivilWar(c) },
-	{ name: 'Up You Go', winning: 2000, fishing: 800, distance: (c, ctx) => distanceUpYouGo(c, ctx) },
-	{ name: 'Down You Go', winning: 2000, fishing: 800, distance: (c, ctx) => distanceDownYouGo(c, ctx) },
-	{ name: 'Red Waratah', winning: 1000, fishing: 400, distance: (c) => distanceRedWaratah(c) },
-	{ name: 'All Winds and Dragons', winning: 1000, fishing: 400, distance: (c) => distanceAllWindsAndDragons(c) }
+	{
+		name: 'Chow Chow',
+		winning: 500,
+		fishing: 200,
+		description: 'Four chows and a pair, all in one suit, won fully concealed and self-drawn off the last tile in the wall.',
+		distance: (c, ctx, max) => distanceChowChow(c, ctx, max)
+	},
+	{
+		name: 'Crazy Chows',
+		winning: 500,
+		fishing: 200,
+		description: 'Four chows in any suits, plus a pair in any suit.',
+		distance: (c, ctx, max) => distanceCrazyChows(c, ctx, max)
+	},
+	{
+		name: 'Little Robert',
+		winning: 500,
+		fishing: 200,
+		description: 'A chow in each of the three suits, plus a pung and a pair, any suit.',
+		distance: (c) => distanceLittleRobert(c)
+	},
+	{
+		name: 'Chop Suey',
+		winning: 1000,
+		fishing: 400,
+		description: 'A 1-2-3 chow in each of the three suits, plus one of each Wind, with one Wind doubled.',
+		distance: (c) => distanceChopSuey(c)
+	},
+	{
+		name: 'Chow Mien',
+		winning: 1000,
+		fishing: 400,
+		description: 'A 7-8-9 chow in each of the three suits, plus one of each Wind, with one Wind doubled.',
+		distance: (c) => distanceChowMien(c)
+	},
+	{
+		name: 'Little Brother',
+		winning: 500,
+		fishing: 200,
+		description: 'A chow in each of the three suits, plus a pair of your own seat Wind and one more chow in any suit.',
+		distance: (c, ctx) => distanceLittleBrother(c, ctx)
+	},
+	{
+		name: 'Apple Blossom',
+		winning: 1000,
+		fishing: 400,
+		description: 'Three chows in any suits, plus a pung of White Dragon and a pair of Green Dragon.',
+		distance: (c, ctx, max) => distanceAppleBlossom(c, ctx, max)
+	},
+	{
+		name: 'The Professors',
+		winning: 500,
+		fishing: 200,
+		description: 'Three chows in any suits, plus one of each Dragon and a pair of your own seat Wind.',
+		distance: (c, ctx, max) => distanceTheProfessors(c, ctx, max)
+	},
+	{
+		name: 'Odds & Evens',
+		winning: 1500,
+		fishing: 600,
+		description: 'Every odd number (1,3,5,7,9) in each of two suits, plus every even number (2,4,6,8) in the third suit.',
+		distance: (c) => distanceOddsAndEvens(c)
+	},
+	{
+		name: 'Heads and Tails',
+		winning: 1000,
+		fishing: 400,
+		description: "A pung of each suit's 1s and each suit's 9s (four pungs total), plus a pair of one more terminal.",
+		distance: (c) => distanceHeadsAndTails(c)
+	},
+	{
+		name: 'Robin',
+		winning: 500,
+		fishing: 200,
+		description: 'A chow in one suit, two chows in a second suit, and a chow plus a pair in a third suit.',
+		distance: (c) => distanceRobin(c)
+	},
+	{
+		name: 'All Pair Jade',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pair (or kong) of Green Dragon, plus pairs of every green Bamboo number (2, 3, 4, 6, 8).',
+		distance: (c) => distanceAllPairJade(c)
+	},
+	{
+		name: 'Imperial Jade',
+		winning: 2000,
+		fishing: 800,
+		description: 'A pung of Green Dragon, plus three pungs of Bamboo numbers (or two pungs and one chow), and a pair of a green Bamboo number.',
+		distance: (c, ctx, max) => distanceImperialJade(c, ctx, max)
+	},
+	{
+		name: 'Lily of the Valley',
+		winning: 2000,
+		fishing: 800,
+		description: 'A pung of Green Dragon and a pung of White Dragon, plus two pungs of Bamboo numbers and a pair of a green Bamboo number.',
+		distance: (c) => distanceLilyOfTheValley(c)
+	},
+	{
+		name: 'Red Lily',
+		winning: 2000,
+		fishing: 800,
+		description: 'A pung of Red Dragon and a pung of White Dragon, plus two pungs of Bamboo numbers and a pair of a red Bamboo number.',
+		distance: (c) => distanceRedLily(c)
+	},
+	{
+		name: 'Royal Ruby',
+		winning: 2000,
+		fishing: 800,
+		description: 'A pung of Red Dragon, plus three pungs of Bamboo numbers and a pair of a red Bamboo number.',
+		distance: (c) => distanceRoyalRuby(c)
+	},
+	{
+		name: 'Ruby Jade',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pung of Red Dragon and a pung of Green Dragon, plus two pungs of Bamboo numbers and a pair of a red or green Bamboo number.',
+		distance: (c) => distanceRubyJade(c)
+	},
+	{
+		name: 'Lillypilly',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pung of Green Dragon and a pair of White Dragon, plus three pungs of Dots numbers.',
+		distance: (c) => distanceLillypilly(c)
+	},
+	{
+		name: 'Blue Mountains',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pung of Green Dragon, plus three pungs of Dots numbers and a pair of a blue-circle Dots number (2, 3, 4, 5, 8, 9).',
+		distance: (c) => distanceBlueMountains(c)
+	},
+	{
+		name: 'White Elephant',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pung of White Dragon, plus three pungs of Dots numbers and a pair of an even Dots number.',
+		distance: (c) => distanceWhiteElephant(c)
+	},
+	{
+		name: 'Driven Snow',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pung of White Dragon, plus three pungs of Characters numbers and a pair of an odd Characters number.',
+		distance: (c) => distanceDrivenSnow(c)
+	},
+	{
+		name: "Dragon's Scales",
+		winning: 1000,
+		fishing: 400,
+		description: 'A pung of Red Dragon, plus three pungs of Characters numbers and a pair of an even Characters number.',
+		distance: (c) => distanceDragonsScales(c)
+	},
+	{
+		name: 'Dragonette',
+		winning: 1000,
+		fishing: 400,
+		description: 'One of each Wind, plus one of each Dragon with one Dragon doubled, and three pairs of non-terminal numbers (2-8) in one suit.',
+		distance: (c) => distanceDragonette(c)
+	},
+	{
+		name: "Dragon's Run",
+		winning: 1500,
+		fishing: 600,
+		description: 'A run of 1-9 in one suit, plus one of each Dragon and a pair of any Wind.',
+		distance: (c) => distanceDragonsRun(c)
+	},
+	{
+		name: 'Sunrise',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pung of East Wind and a pair of White Dragon, plus a pung using only numbers 2-8 in each of the three suits.',
+		distance: (c) => distanceSunrise(c)
+	},
+	{
+		name: 'Sunset',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pung of West Wind and a pair of Red Dragon, plus a pung using only numbers 2-8 in each of the three suits.',
+		distance: (c) => distanceSunset(c)
+	},
+	{
+		name: 'Numbers in Parallel',
+		winning: 1500,
+		fishing: 600,
+		description: 'A pung of one Wind/Dragon and a pair of a different Wind/Dragon, plus the same non-terminal number (2-8) pung\'d in all three suits.',
+		distance: (c) => distanceNumbersInParallel(c)
+	},
+	{
+		name: 'Numbers Doubled',
+		winning: 1500,
+		fishing: 600,
+		description:
+			'(Best-effort reading, unconfirmed) A pair of a Wind/Dragon, plus two different non-terminal numbers, each pung\'d in two different suits.',
+		distance: (c) => distanceNumbersDoubled(c)
+	},
+	{
+		name: 'Chinese Odds',
+		winning: 1500,
+		fishing: 600,
+		description: 'A pair of one odd number, plus pungs of three other odd numbers, all in one suit.',
+		distance: (c) => distanceChineseOdds(c)
+	},
+	{
+		name: 'Seven Twins',
+		winning: 500,
+		fishing: 200,
+		description: 'Seven pairs of any tiles (All Pair\'s shape), won fully concealed and self-drawn off the last tile in the wall.',
+		distance: (c, ctx) => distanceSevenTwins(c, ctx)
+	},
+	{
+		name: 'Golden Gates',
+		winning: 1000,
+		fishing: 400,
+		description:
+			"Pairs of the even numbers 2, 4, 6, 8 in one suit, plus a pung of that suit's matching terminal (1 or 9) and a pung of its matching Dragon.",
+		distance: (c) => distanceGoldenGates(c)
+	},
+	{
+		name: 'Windy Dragons',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pair of each of the four Winds, plus a pung of two different Dragons.',
+		distance: (c) => distanceWindyDragons(c)
+	},
+	{
+		name: 'Windvane',
+		winning: 1000,
+		fishing: 400,
+		description: 'One of each Wind with one doubled, plus a pung of one number in each of the three suits.',
+		distance: (c) => distanceWindvane(c)
+	},
+	{
+		name: 'Three Sisters',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pung of 3s in each of the three suits, plus one of each Wind, with one Wind doubled.',
+		distance: (c) => distanceWindyRank(c, 3)
+	},
+	{
+		name: 'Seven Brothers',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pung of 7s in each of the three suits, plus one of each Wind, with one Wind doubled.',
+		distance: (c) => distanceWindyRank(c, 7)
+	},
+	{
+		name: 'Civil War',
+		winning: 1500,
+		fishing: 600,
+		description:
+			'A pung of North Wind and a pung of South Wind, plus the numbers 1, 1, 6, 8 in one suit and 1, 5, 6, 8 in a different suit.',
+		distance: (c) => distanceCivilWar(c)
+	},
+	{
+		name: 'Up You Go',
+		winning: 2000,
+		fishing: 800,
+		description:
+			'A concealed kong of 8s in one suit, plus one of each Wind, a single 2, a pair of 4s, a pung of 6s, and the kong of 8s in that suit (2, 4-4, 6-6-6, 8-8-8-8).',
+		distance: (c, ctx) => distanceUpYouGo(c, ctx)
+	},
+	{
+		name: 'Down You Go',
+		winning: 2000,
+		fishing: 800,
+		description:
+			'A concealed kong of 2s in one suit, plus one of each Wind, and 2-2-2-2, 4-4-4, 6-6, and a single 8 in that suit.',
+		distance: (c, ctx) => distanceDownYouGo(c, ctx)
+	},
+	{
+		name: 'Red Waratah',
+		winning: 1000,
+		fishing: 400,
+		description:
+			'A pung of Red Dragon and a pair of Green Dragon, plus a pung of a red Bamboo number, a pung in Dots, and a pung in Characters.',
+		distance: (c) => distanceRedWaratah(c)
+	},
+	{
+		name: 'All Winds and Dragons',
+		winning: 1000,
+		fishing: 400,
+		description: 'A pair of one Wind or Dragon, plus a pung of four other different Winds/Dragons.',
+		distance: (c) => distanceAllWindsAndDragons(c)
+	}
 ];
 
 // Normalizes a player's tiles (concealed hand + revealed meld tiles, kongs capped at 3
@@ -1906,7 +2400,7 @@ function namedHandDistances(player, handMode, maxDistance = 3) {
 	for (const hand of handsListFor(handMode)) {
 		const distance = handDistance(hand, tally, ctx, maxDistance);
 		if (distance > maxDistance) continue;
-		const entry = { name: hand.name, winning: hand.winning, fishing: hand.fishing, distance, waits: [] };
+		const entry = { name: hand.name, description: hand.description, winning: hand.winning, fishing: hand.fishing, distance, waits: [] };
 		if (distance === 1) {
 			for (const probe of ALL_TILE_KINDS) {
 				const trial = cloneCounts(tally);

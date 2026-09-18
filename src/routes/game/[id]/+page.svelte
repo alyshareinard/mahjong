@@ -89,6 +89,7 @@
 		myOriginalCallActive: boolean;
 		myNamedHandFishing: {
 			name: string;
+			description: string;
 			winning: number;
 			fishing: number;
 			distance: number;
@@ -634,6 +635,7 @@
 												it, {nh.fishing} if the hand ends first
 											</span>
 										</p>
+										<p class="text-sky-300/60 italic mt-0.5">{nh.description}</p>
 										{#if nh.waits.length > 0}
 											<div class="flex flex-wrap gap-1 mt-0.5">
 												{#each nh.waits as w}
