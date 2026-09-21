@@ -1,10 +1,13 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
+	import SpecialHandsModal from '$lib/components/SpecialHandsModal.svelte';
+	import { FULL_LIST_HANDS } from '$lib/specialHandsData';
 
 	let playerName = $state('');
 	let roomCode = $state('');
 	let playerId = $state('');
+	let showSpecialHands = $state(false);
 
 	const NAME_KEY = 'mahjong-player-name';
 	const ID_KEY = 'mahjong-player-id';
@@ -100,6 +103,13 @@
 		📚 Learn scoring
 	</a>
 
+	<button
+		onclick={() => (showSpecialHands = true)}
+		class="mt-3 inline-flex items-center gap-2 px-4 py-2 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-400/30 rounded-lg text-sm text-purple-200 hover:text-purple-100 transition-colors touch-manipulation"
+	>
+		🀄 Special hands
+	</button>
+
 	<a
 		href="https://buymeacoffee.com/tech.aly"
 		target="_blank"
@@ -109,3 +119,11 @@
 		☕ Buy me a coffee
 	</a>
 </div>
+
+{#if showSpecialHands}
+	<SpecialHandsModal
+		hands={FULL_LIST_HANDS}
+		subtitle="All named hands from the book, both the Short List and the Full List additions. A table can play with just the Short List, or none at all — see 'Hand rules' when you create a table."
+		onclose={() => (showSpecialHands = false)}
+	/>
+{/if}

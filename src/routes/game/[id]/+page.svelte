@@ -5,6 +5,8 @@
 	import { sortTiles, tileName, windLabel, type Tile as TileT, type WindRank } from '$lib/tiles';
 	import { analyzeHand, computeUnderlines, computeUkeire, suggestDiscards, evaluateClaimOptions, shantenLabel } from '$lib/shanten';
 	import TileComponent from '$lib/components/Tile.svelte';
+	import SpecialHandsModal from '$lib/components/SpecialHandsModal.svelte';
+	import { SHORT_LIST_HANDS, FULL_LIST_HANDS } from '$lib/specialHandsData';
 	import { onMount, onDestroy } from 'svelte';
 	import type { Socket } from 'socket.io-client';
 
@@ -121,6 +123,7 @@
 	let nameInput = $state('');
 	let confirmRemovePlayerId: string | null = $state(null);
 	let showRules = $state(false);
+	let showSpecialHands = $state(false);
 	let chatOpen = $state(false);
 	let chatInput = $state('');
 	let chatUnreadCount = $state(0);
@@ -133,6 +136,12 @@
 	let myMeldsNeeded = $derived.by(() => {
 		const g = gameState;
 		return g ? 4 - g.myMelds.length : 4;
+	});
+
+	let relevantSpecialHands = $derived.by(() => {
+		const g = gameState;
+		if (!g) return [];
+		return g.handMode === 'fullList' ? FULL_LIST_HANDS : g.handMode === 'shortList' ? SHORT_LIST_HANDS : [];
 	});
 	let myAnalysis = $derived.by(() => {
 		const g = gameState;
@@ -383,6 +392,16 @@
 			>
 				?
 			</button>
+			{#if relevantSpecialHands.length > 0}
+				<button
+					onclick={() => (showSpecialHands = true)}
+					class="p-2 bg-black/30 hover:bg-black/40 rounded-full transition-colors touch-manipulation text-sm"
+					aria-label="Special hands"
+					title="Special hands"
+				>
+					🀄
+				</button>
+			{/if}
 			<button
 				onclick={toggleChat}
 				class="relative p-2 bg-black/30 hover:bg-black/40 rounded-full transition-colors touch-manipulation"
@@ -868,6 +887,16 @@
 			<button onclick={() => (showRules = false)} class="mt-4 w-full py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg font-semibold transition-colors touch-manipulation">Got it</button>
 		</div>
 	</div>
+{/if}
+
+{#if showSpecialHands}
+	<SpecialHandsModal
+		hands={relevantSpecialHands}
+		subtitle={gameState?.handMode === 'fullList'
+			? "This table is playing Full List rules — the book's complete synopsis of special hands."
+			: "This table is playing Short List rules — the book's beginner-friendly named hands."}
+		onclose={() => (showSpecialHands = false)}
+	/>
 {/if}
 
 {#if confirmRemovePlayerId}
