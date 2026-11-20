@@ -200,6 +200,27 @@
 		winningTileId = null;
 	}
 
+	// 13 tiles normally, 14 for the winner, plus one extra per kong (four tiles in a three-slot set).
+	// Flowers and seasons aren't counted.
+	function tileStatus(i: number): { text: string; tone: 'info' | 'ok' | 'warn' | 'bad' } {
+		const p = players[i];
+		const kongs = p.melds.filter((m) => m.type === 'kong').length;
+		const count = p.hand.length + p.melds.reduce((n, m) => n + m.tiles.length, 0);
+		const isWinner = winnerIndex === i;
+		const target = (isWinner ? 14 : 13) + kongs;
+		if (count < target) return { text: `${count} / ${target} tiles · ${target - count} to add`, tone: 'info' };
+		if (count === target) return { text: `${count} / ${target} tiles ✓`, tone: 'ok' };
+		if (!isWinner && count === target + 1) return { text: `${count} tiles · the winner? Tick Mah-Jong`, tone: 'warn' };
+		return { text: `${count} / ${target} tiles · ${count - target} too many`, tone: 'bad' };
+	}
+
+	const STATUS_TONE = {
+		info: 'text-emerald-200/70',
+		ok: 'text-emerald-300',
+		warn: 'text-amber-300',
+		bad: 'text-red-300'
+	};
+
 	function displayName(i: number): string {
 		return players[i].name.trim() || `Player ${i + 1}`;
 	}
@@ -362,6 +383,7 @@
 					/>
 					<span class="shrink-0 text-sm font-semibold tabular-nums {totals[i] < 0 ? 'text-red-300' : 'text-emerald-300'}">{signed(totals[i])}</span>
 				</div>
+				<p class="h-4 truncate text-xs {STATUS_TONE[tileStatus(i).tone]}">{tileStatus(i).text} <span class="text-emerald-200/40">(flowers not counted)</span></p>
 
 {#if editing !== i}
 {@render summary(i, player)}
