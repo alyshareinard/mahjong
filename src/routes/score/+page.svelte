@@ -15,7 +15,9 @@
 	} from '$lib/scorekeeper';
 
 	type EditorMode = 'hand' | 'meld' | 'flowers';
-	type MeldKind = 'chow' | 'pung' | 'kong';
+	type MeldKind = 'chow' | 'pung' | 'kong' | 'pair';
+	// Marks a discard win whose winning tile completed a set that was already entered as a declared set.
+	const IN_DECLARED_SET = 'in-declared-set';
 	type HistoryEntry = {
 		hand: number;
 		dealerName: string;
@@ -53,7 +55,7 @@
 	let editing: number | null = $state(null);
 	let editorMode: EditorMode = $state('hand');
 	let meldKind: MeldKind = $state('pung');
-	let kongConcealed = $state(false);
+	let meldConcealed = $state(false);
 
 	onMount(() => {
 		try {
@@ -146,6 +148,7 @@
 		}
 		if (t.suit === 'flower') return true;
 		if (editorMode === 'hand') return p.hand.length >= expectedWinnerHandSize(p) || remaining(t) < 1;
+		if (meldKind === 'pair') return p.hand.length + 2 > expectedWinnerHandSize(p) || remaining(t) < 2;
 		if (p.melds.length >= 4) return true;
 		if (meldKind === 'pung') return remaining(t) < 3;
 		if (meldKind === 'kong') return remaining(t) < 4;
@@ -161,12 +164,15 @@
 		} else if (editorMode === 'flowers') {
 			const existing = p.flowers.find((f) => usageKey(f) === usageKey(t));
 			p.flowers = existing ? p.flowers.filter((f) => f !== existing) : [...p.flowers, makeTile('flower', t.rank, t.kind)];
+		} else if (meldKind === 'pair') {
+			// A pair has no scoring of its own to declare; it simply joins the hand tiles.
+			p.hand = sortTiles([...p.hand, makeTile(t.suit, t.rank), makeTile(t.suit, t.rank)]);
 		} else {
 			const tiles =
 				meldKind === 'chow'
 					? [0, 1, 2].map((i) => makeTile(t.suit, (t.rank as number) + i))
 					: Array.from({ length: meldKind === 'kong' ? 4 : 3 }, () => makeTile(t.suit, t.rank));
-			const meld: Meld = { type: meldKind, concealed: meldKind === 'kong' && kongConcealed, tiles };
+			const meld: Meld = { type: meldKind, concealed: meldConcealed, tiles };
 			p.melds.push(meld);
 		}
 	}
@@ -252,7 +258,7 @@
 	}
 
 	function meldLabel(m: Meld): string {
-		return `${m.type === 'kong' && m.concealed ? 'concealed ' : ''}${m.type}`;
+		return `${m.concealed ? 'concealed ' : ''}${m.type}`;
 	}
 </script>
 
@@ -382,19 +388,23 @@
 						{:else if editorMode === 'meld'}
 							<div class="flex flex-wrap items-center gap-3 text-xs">
 								<div class="inline-flex rounded-lg overflow-hidden border border-white/15">
-									{#each ['chow', 'pung', 'kong'] as k}
+									{#each ['chow', 'pung', 'kong', 'pair'] as k}
 										<button
 											onclick={() => (meldKind = k as MeldKind)}
 											class="px-3 py-1.5 capitalize touch-manipulation {meldKind === k ? 'bg-sky-600' : 'bg-black/20 hover:bg-black/30'}"
 										>{k}</button>
 									{/each}
 								</div>
-								{#if meldKind === 'kong'}
-									<label class="flex items-center gap-1.5"><input type="checkbox" bind:checked={kongConcealed} /> concealed (face-down)</label>
+								{#if meldKind !== 'pair'}
+									<label class="flex items-center gap-1.5"><input type="checkbox" bind:checked={meldConcealed} /> concealed (not taken from a discard)</label>
 								{/if}
 							</div>
 							<p class="text-xs text-emerald-200/70">
-								{meldKind === 'chow' ? 'Tap the lowest tile of the run.' : `Tap the tile to add a ${meldKind}.`} Exposed sets are declared here; sets still hidden in the hand are entered as hand tiles.
+								{#if meldKind === 'pair'}
+									Tap a tile to add a pair. It goes in with the hand tiles.
+								{:else}
+									{meldKind === 'chow' ? 'Tap the lowest tile of the run.' : `Tap the tile to add a ${meldKind}.`} Tick "concealed" for a set you built yourself rather than claimed from a discard; leave it unticked for an exposed set. Sets can also just be entered as hand tiles.
+								{/if}
 							</p>
 						{:else}
 							<p class="text-xs text-emerald-200/70">Tap a flower or season to add it; tap it again to remove it.</p>
@@ -442,6 +452,12 @@
 									<TileComponent tile={t} small highlight={winningTileId === t.id} onclick={() => (winningTileId = t.id)} />
 								{/each}
 							</div>
+							{#if players[winnerIndex].melds.length > 0}
+								<button
+									onclick={() => (winningTileId = IN_DECLARED_SET)}
+									class="mt-1.5 text-xs px-3 py-1.5 rounded-lg touch-manipulation {winningTileId === IN_DECLARED_SET ? 'bg-sky-600' : 'bg-black/30 hover:bg-black/40'}"
+								>It completed a set I entered as a declared set (mark that set exposed)</button>
+							{/if}
 						</div>
 					{/if}
 					<div class="flex flex-wrap gap-x-5 gap-y-1.5 text-xs">
