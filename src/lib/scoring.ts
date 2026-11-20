@@ -55,6 +55,9 @@ export interface ScoreContext {
 	selfDraw: boolean;
 	wonWithLastWallTile?: boolean;
 	wonWithFinalDiscard?: boolean;
+	/** Defaults to true. False scores a non-winning hand: no Mah-Jong bonus and no winner-only doubles. */
+	isWinner?: boolean;
+	originalCall?: boolean;
 }
 
 export interface ScoreDetail {
@@ -74,9 +77,10 @@ export interface ScoreResult {
 	cappedScore: number;
 }
 
-/** Scores a complete (winning) hand exactly as the live game would. */
+/** Scores a hand exactly as the live game would (a complete winning hand unless isWinner is false). */
 export function computeHandScore(ctx: ScoreContext): ScoreResult {
-	const { melds, pairKey, flowers, seatWind, roundWind, selfDraw, wonWithLastWallTile, wonWithFinalDiscard } = ctx;
+	const { melds, pairKey, flowers, seatWind, roundWind, selfDraw, wonWithLastWallTile, wonWithFinalDiscard, originalCall } = ctx;
+	const isWinner = ctx.isWinner !== false;
 	const detail: ScoreDetail[] = [];
 	let basic = 0;
 	function addBasic(name: string, value: number) {
@@ -103,8 +107,10 @@ export function computeHandScore(ctx: ScoreContext): ScoreResult {
 		if (pts > 0) addBasic(`Pair of ${tileName({ suit: pSuit, rank: pRank } as Tile)}`, pts);
 	}
 	if (flowers.length > 0) addBasic(`Flowers/Seasons x${flowers.length}`, flowers.length * 4);
-	addBasic('Going Mah-Jong', 20);
-	if (selfDraw) addBasic('Drew winning tile from wall', 2);
+	if (isWinner) {
+		addBasic('Going Mah-Jong', 20);
+		if (selfDraw) addBasic('Drew winning tile from wall', 2);
+	}
 
 	for (const m of melds) {
 		if (m.type === 'chow') continue;
@@ -122,18 +128,21 @@ export function computeHandScore(ctx: ScoreContext): ScoreResult {
 	if ([1, 2, 3, 4].every((n) => flowers.some((f) => f.kind === 'flower' && f.rank === n))) addDouble('Complete set of Flowers', 2);
 	if ([1, 2, 3, 4].every((n) => flowers.some((f) => f.kind === 'season' && f.rank === n))) addDouble('Complete set of Seasons', 2);
 
-	if (melds.every((m) => m.type !== 'chow')) addDouble('No chows');
-	const allKeys = [...melds.flatMap((m) => m.tiles.map(tileKeyOf)), pairKey];
-	const suits = new Set(allKeys.map((k) => k.split('-')[0]).filter((s) => s !== 'wind' && s !== 'dragon'));
-	if (suits.size === 1) addDouble('All one suit with Winds/Dragons');
-	const allTerminalOrHonor = allKeys.every((k) => {
-		const [s, r] = k.split('-');
-		return s === 'wind' || s === 'dragon' || r === '1' || r === '9';
-	});
-	if (allTerminalOrHonor) addDouble('All 1s and 9s with Winds/Dragons');
-	if (melds.every((m) => m.concealed)) addDouble('Fully concealed hand');
-	if (wonWithLastWallTile) addDouble('Won with last tile from wall');
-	if (wonWithFinalDiscard) addDouble('Won with final discard');
+	if (isWinner) {
+		if (melds.every((m) => m.type !== 'chow')) addDouble('No chows');
+		const allKeys = [...melds.flatMap((m) => m.tiles.map(tileKeyOf)), pairKey];
+		const suits = new Set(allKeys.map((k) => k.split('-')[0]).filter((s) => s !== 'wind' && s !== 'dragon'));
+		if (suits.size === 1) addDouble('All one suit with Winds/Dragons');
+		const allTerminalOrHonor = allKeys.every((k) => {
+			const [s, r] = k.split('-');
+			return s === 'wind' || s === 'dragon' || r === '1' || r === '9';
+		});
+		if (allTerminalOrHonor) addDouble('All 1s and 9s with Winds/Dragons');
+		if (melds.every((m) => m.concealed)) addDouble('Fully concealed hand');
+		if (wonWithLastWallTile) addDouble('Won with last tile from wall');
+		if (wonWithFinalDiscard) addDouble('Won with final discard');
+		if (originalCall) addDouble('Original call');
+	}
 
 	const rawScore = Math.round(basic * Math.pow(2, doubles));
 	const cappedScore = Math.min(rawScore, LIMIT);

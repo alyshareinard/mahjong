@@ -103,6 +103,13 @@
 		📚 Learn scoring
 	</a>
 
+	<a
+		href="/score"
+		class="mt-3 inline-flex items-center gap-2 px-4 py-2 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-400/30 rounded-lg text-sm text-emerald-200 hover:text-emerald-100 transition-colors touch-manipulation"
+	>
+		🧮 Table scorekeeper
+	</a>
+
 	<button
 		onclick={() => (showSpecialHands = true)}
 		class="mt-3 inline-flex items-center gap-2 px-4 py-2 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-400/30 rounded-lg text-sm text-purple-200 hover:text-purple-100 transition-colors touch-manipulation"
